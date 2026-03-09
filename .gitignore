@@ -1,0 +1,48 @@
+# Build directories
+build/
+devel/
+install/
+
+# Log files
+logs/
+*.log
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+CTestConfiguration.ini
+CTestCustom.cmake
+CTestTestfile.cmake
+install_manifest.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# ROS
+*.catkin_tools
+catkin_tools_profiles/
+
+# Temporary files
+*.tmp
+*.bak
