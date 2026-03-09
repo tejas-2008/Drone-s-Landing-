@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Full Platform IBVS stack launch file -->
+  <!-- Includes: Fiducial detection, Platform IBVS controller, and visualization -->
+
+  <arg name="robot_namespace" default="" />
+  <arg name="camera_topic_prefix" default="" />
+  <arg name="use_simulation" default="false" />
+  <arg name="rviz_visualization" default="true" />
+
+  <!-- Main IBVS Controller -->
+  <include file="$(find dynamic_ibvs)/launch/platform_ibvs.launch" />
+
+  <!-- Optional: RVIZ Visualization -->
+  <group if="$(arg rviz_visualization)">
+    <node
+      pkg="rviz"
+      type="rviz"
+      name="platform_ibvs_rviz"
+      args="-d $(find dynamic_ibvs)/config/platform_ibvs.rviz"
+      output="log"
+    />
+  </group>
+
+  <!-- Node for diagnostics and monitoring -->
+  <node
+    pkg="dynamic_ibvs"
+    type="platform_ibvs_node"
+    name="platform_ibvs_monitor"
+    output="log"
+  >
+    <param name="diagnostic_publish_rate" value="1.0" />
+  </node>
+
+</launch>

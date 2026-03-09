@@ -1,0 +1,42 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+
+  <world name="ibvs_world">
+
+    <!-- ==================== Physics ==================== -->
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+
+    <!-- ==================== Lighting ==================== -->
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <!-- ==================== Ground Plane ==================== -->
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+
+    <!-- ==================== ArUco Markers ==================== -->
+    <include>
+      <uri>model://aruco/DICT_4X4_50/marker_0</uri>
+      <!-- x y z roll pitch yaw -->
+      <pose>2.0 0.0 1.2 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>model://aruco/DICT_4X4_50/marker_7</uri>
+      <pose>2.0 1.5 1.2 0 0 0</pose>
+    </include>
+
+    <!-- ==================== IRIS Drone ==================== -->
+    <include>
+      <uri>model://iris</uri>
+      <pose>0 0 0.15 0 0 0</pose>
+    </include>
+
+  </world>
+</sdf>

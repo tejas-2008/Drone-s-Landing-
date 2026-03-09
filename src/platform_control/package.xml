@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>platform_control</name>
+  <version>0.0.1</version>
+  <description>
+    Gazebo model plugin with ROS service interface to control
+    a moving platform via velocity commands.
+  </description>
+
+  <maintainer email="tejas@example.com">Tejas</maintainer>
+  <license>MIT</license>
+
+  <!-- Build tool -->
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- Build dependencies -->
+  <build_depend>roscpp</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>message_generation</build_depend>
+
+  <!-- Run dependencies -->
+  <exec_depend>roscpp</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>message_runtime</exec_depend>
+
+  <!-- Gazebo (system dependency) -->
+  <build_depend>gazebo_dev</build_depend>
+  <exec_depend>gazebo</exec_depend>
+
+  <export>
+    <!-- This makes the plugin discoverable -->
+    <gazebo_ros plugin_path="${prefix}/lib"/>
+  </export>
+</package>
+

@@ -1,0 +1,7 @@
+float64 vx      # m/s (world X)
+float64 vy      # m/s (world Y)
+float64 vz      # m/s (world Z)
+float64 yaw_rate  # rad/s
+---
+bool success
+string message

@@ -1,0 +1,14 @@
+material Marker/0
+{
+  technique
+  {
+    pass    
+    {
+      texture_unit
+      {
+        texture ../textures/model.png
+        tex_address_mode wrap
+      }
+    }
+  }
+}

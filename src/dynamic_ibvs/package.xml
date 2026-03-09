@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>dynamic_ibvs</name>
+  <version>1.0.0</version>
+  <description>
+    Dynamic Platform IBVS (Image-Based Visual Servoing) Controller
+    
+    This package provides a modular, image-based visual servoing implementation
+    for mobile robot platforms using ArUco marker tracking. The controller
+    achieves platform pose stabilization by minimizing visual feature error
+    using marker corner moments and adaptive control gains.
+  </description>
+
+  <maintainer email="tejas@example.com">Tejas</maintainer>
+  <license>BSD</license>
+
+  <author email="tejas@example.com">Tejas</author>
+
+  <!-- Build Dependencies -->
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- Runtime Dependencies -->
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>fiducial_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>image_transport</depend>
+  <depend>opencv</depend>
+
+  <!-- Build-only Dependencies -->
+  <build_depend>armadillo</build_depend>
+  <exec_depend>armadillo</exec_depend>
+
+</package>

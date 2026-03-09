@@ -1,0 +1,15 @@
+material Marker/7
+{
+  technique
+  {
+    pass
+    {
+      texture_unit
+      {
+        # texture path is relative to this script; generator will write textures/marker_<id>.png
+        texture ../textures/model.png
+        tex_address_mode wrap
+      }
+    }
+  }
+}

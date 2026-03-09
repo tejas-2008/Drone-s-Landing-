@@ -1,0 +1,6 @@
+fractal_marker:
+  output_dir: "/home/tejas/dev_ws/models/fractal/material/textures"
+
+  pixel_size: 1000
+  margin: 10
+  border_bits: 1

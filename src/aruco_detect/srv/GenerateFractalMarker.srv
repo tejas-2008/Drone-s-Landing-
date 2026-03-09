@@ -1,0 +1,8 @@
+string name
+string dictionary
+int16 levels
+float32 scale
+---
+bool success
+string message
+string output_path

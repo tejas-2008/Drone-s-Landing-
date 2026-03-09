@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- ArUco Group Detector Node -->
+    <node name="group_detection" pkg="aruco_detect" type="group_detection_node" output="screen">
+        <!-- Remap topics from node subscription names to actual published topics -->
+        <remap from="/camera/rgb/image_raw" to="/iris_downward_depth_camera/camera/rgb/image_raw"/>
+        <remap from="/camera/depth/image_raw" to="/iris_downward_depth_camera/camera/depth/image_raw"/>
+        <remap from="/camera/rgb/camera_info" to="/iris_downward_depth_camera/camera/rgb/camera_info"/>
+        
+        <!-- Output topics -->
+        <remap from="platform_pose" to="platform_pose"/>
+        <remap from="/fiducial_images" to="/fiducial_images"/>
+        
+        <!-- Load parameters from config file -->
+        <rosparam command="load" file="$(find aruco_detect)/config/aruco_detect.yaml"/>
+        <param name="group_definition_file" value="$(find aruco_detect)/config/marker_groups.yaml"/>
+        
+    </node>
+</launch>

@@ -1,0 +1,29 @@
+# Platform IBVS Controller Parameters
+
+# Tracking Configuration
+tracking_marker_id: 999          # ID of the ArUco marker to track
+
+# Depth and Geometry
+desired_depth: 1.0             # Desired tracking distance (meters)
+
+# Control Loop
+control_frequency: 50.0        # Control loop frequency (Hz)
+
+# Convergence Criteria
+error_threshold: 0.05          # Threshold for convergence (normalized units)
+
+# Velocity Limits
+max_linear_velocity: 0.5       # Maximum linear velocity (m/s)
+max_angular_velocity: 1.0      # Maximum angular velocity (rad/s)
+
+# IBVS Controller Parameters
+lambda_min: 0.5                # Minimum adaptive gain
+lambda_max: 1.25               # Maximum adaptive gain
+
+# Marker Detection
+min_markers_for_init: 1        # Minimum markers required for initialization
+max_loss_count: 5              # Maximum consecutive losses before stopping
+
+# Logging
+debug_logging: false           # Enable detailed debug logging
+visualize_features: true       # Publish annotated images

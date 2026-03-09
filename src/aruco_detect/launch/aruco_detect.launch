@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- ArUco Detector Node -->
+    <node name="aruco_detect" pkg="aruco_detect" type="aruco_detect_node" output="screen">
+        <!-- Remap topics from node subscription names to actual published topics -->
+        <remap from="/camera/rgb/image_raw" to="/iris_downward_depth_camera/camera/rgb/image_raw"/>
+        <remap from="/camera/depth/image_raw" to="/iris_downward_depth_camera/camera/depth/image_raw"/>
+        <remap from="/camera/rgb/camera_info" to="/iris_downward_depth_camera/camera/rgb/camera_info"/>
+        
+        <!-- Output topics -->
+        <remap from="fiducial_vertices" to="fiducial_vertices"/>
+        <remap from="fiducial_transforms" to="fiducial_transforms"/>
+        <remap from="/fiducial_images" to="/fiducial_images"/>
+        
+        <!-- Load parameters from config file -->
+        <rosparam command="load" file="$(find aruco_detect)/config/aruco_detect.yaml"/>
+        
+        <!-- Can override parameters here if needed -->
+        <!-- <param name="marker_size" value="5"/>  -->
+        <!-- <param name="aruco_dictionary" value="DICT_4X4_50"/>  -->
+    </node>
+
+</launch>

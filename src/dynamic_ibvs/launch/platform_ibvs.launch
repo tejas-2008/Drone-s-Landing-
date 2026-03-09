@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Platform IBVS Controller Launch File -->
+  <!-- Main controller for image-based visual servoing on the platform -->
+
+  <arg name="robot_namespace" default="" />
+  <arg name="camera_topic_prefix" default="" />
+  <arg name="use_simulation" default="false" />
+  
+  <!-- Load parameters from YAML configuration file -->
+  <rosparam command="load" file="$(find dynamic_ibvs)/config/platform_ibvs_params.yaml" />
+  
+  <!-- Fiducial detection node -->
+  <node
+    pkg="aruco_detect"
+    type="aruco_detect_node"
+    name="aruco_detect"
+    output="log"
+  >
+    <param name="image_topic" value="$(arg camera_topic_prefix)/image_raw" />
+    <param name="camera_info_topic" value="$(arg camera_topic_prefix)/camera_info" />
+  </node>
+
+  <!-- Platform IBVS Controller -->
+  <node
+    pkg="dynamic_ibvs"
+    type="platform_ibvs_node"
+    name="platform_ibvs_controller"
+    output="screen"
+    ns="$(arg robot_namespace)"
+  >
+    <param name="marker_topic" value="/fiducial_transforms" />
+    <param name="velocity_command_topic" value="cmd_vel" />
+  </node>
+
+</launch>

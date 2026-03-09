@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- Standalone launch file with all required nodes -->
+    
+    <!-- Include the ArUco detector -->
+    <include file="$(find aruco_detect)/launch/aruco_detect.launch"/>
+</launch>

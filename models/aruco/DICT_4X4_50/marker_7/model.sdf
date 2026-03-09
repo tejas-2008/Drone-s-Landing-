@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="marker_7">
+    <static>true</static>
+    <link name="marker_link">
+      <!-- marker is a thin box so texture appears on faces -->
+      <pose>0 0 0 0 0 0</pose>
+
+      <collision name="collision">
+        <geometry>
+          <box>
+            <!-- 0.2m x 0.2m square, thin thickness -->
+            <size>0.2 0.2 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>0.2 0.2 0.01</size>
+          </box>
+        </geometry>
+        <material>
+          <!-- script refers to the material script in this model -->
+          <script>
+            <uri>model://aruco/DICT_4X4_50/marker_7/materials/scripts</uri>
+            <uri>model://aruco/DICT_4X4_50/marker_7/materials/textures</uri>
+            <name>Marker/7</name>
+          </script>
+          <ambient>1 1 1 1</ambient>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>
