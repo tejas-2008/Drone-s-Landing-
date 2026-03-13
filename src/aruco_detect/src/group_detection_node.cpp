@@ -198,13 +198,28 @@ public:
                     camera_matrix_.at<double>(i / 3, i % 3) = camera_info_msg->K[i];
                 }
                 
-                dist_coeffs_ = cv::Mat(5, 1, CV_64F);
-                for (int i = 0; i < 5; i++) {
-                    dist_coeffs_.at<double>(i) = camera_info_msg->D[i];
-                }
+                // Initialize distortion coefficients with zeros
+                dist_coeffs_ = cv::Mat(5, 1, CV_64F, cv::Scalar(0.0));
                 
+                // Fill in distortion coefficients if available and valid
+                if (camera_info_msg->D.size() >= 5) {
+                    bool all_valid = true;
+                    for (size_t i = 0; i < 5; i++) {
+                        if (std::isnan(camera_info_msg->D[i]) || std::isinf(camera_info_msg->D[i])) {
+                            all_valid = false;
+                            break;
+                        }
+                        dist_coeffs_.at<double>(i) = camera_info_msg->D[i];
+                    }
+                    if (!all_valid) {
+                        ROS_WARN("Invalid distortion coefficients detected, using zeros");
+                        dist_coeffs_ = cv::Mat(5, 1, CV_64F, cv::Scalar(0.0));
+                    }
+                } else {
+                    ROS_WARN("No distortion coefficients provided, using zeros");
+                }
                 camera_calibrated_ = true;
-                ROS_INFO("Camera calibrated");
+                ROS_INFO(COLOR_BLUE "Camera calibrated" COLOR_RESET);
             }
 
             cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(rgb_msg, sensor_msgs::image_encodings::BGR8);
@@ -272,10 +287,22 @@ public:
                             // Use a standard marker size of 0.05m (5cm) for pose estimation
                             float marker_size = 0.05;
                             std::vector<cv::Vec3d> marker_rvecs, marker_tvecs;
-                            cv::aruco::estimatePoseSingleMarkers(
-                                {corners[i]}, marker_size, camera_matrix_, dist_coeffs_,
-                                marker_rvecs, marker_tvecs
-                            );
+                            std::cout << COLOR_YELLOW << "Estimating pose for marker ID: " << ids[i] << COLOR_RESET << std::endl;
+
+                            try {
+                                cv::aruco::estimatePoseSingleMarkers(
+                                    corners, marker_size, camera_matrix_, dist_coeffs_,
+                                    marker_rvecs, marker_tvecs
+                                );
+                            } catch (const cv::Exception& e) {
+                                ROS_ERROR("Failed to estimate pose for marker %d: %s", ids[i], e.what());
+                                ROS_DEBUG("Camera matrix: %dx%d, Dist coeffs: %dx%d", 
+                                    camera_matrix_.rows, camera_matrix_.cols,
+                                    dist_coeffs_.rows, dist_coeffs_.cols);
+                                continue;
+                            }
+                            
+                            std::cout << COLOR_GREEN << "Marker ID: " << ids[i] << " - Estimated rvec: " << marker_rvecs[0] << ", tvec: " << marker_tvecs[0] << COLOR_RESET << std::endl;
                             
                             if (!marker_rvecs.empty() && !marker_tvecs.empty()) {
                                 cv::Vec3d marker_rvec = marker_rvecs[0];
