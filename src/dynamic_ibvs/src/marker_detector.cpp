@@ -10,10 +10,10 @@ MarkerDetector::MarkerDetector(ros::NodeHandle* nh)
       camera_info_received_(false) {
 
     // Subscribe to marker detection topics
-    fiducial_vertices_sub_ = nh->subscribe("fiducial_vertices", 10, &MarkerDetector::fiducialVerticesCallback, this);
-    fiducial_transforms_sub_ = nh->subscribe("fiducial_transforms", 10, &MarkerDetector::fiducialTransformsCallback, this);
-    camera_info_sub_ = nh->subscribe("camera_info", 1, &MarkerDetector::cameraInfoCallback, this);
-    image_sub_ = it_.subscribe("image_raw", 2, &MarkerDetector::imageCallback, this);
+    fiducial_vertices_sub_ = nh->subscribe("/fiducial_vertices", 10, &MarkerDetector::fiducialVerticesCallback, this);
+    fiducial_transforms_sub_ = nh->subscribe("/fiducial_transforms", 10, &MarkerDetector::fiducialTransformsCallback, this);
+    camera_info_sub_ = nh->subscribe("/iris_downward_depth_camera/camera/rgb/camera_info", 1, &MarkerDetector::cameraInfoCallback, this);
+    image_sub_ = it_.subscribe("/iris_downward_depth_camera/camera/rgb/image_raw", 2, &MarkerDetector::imageCallback, this);
     
     image_pub_ = it_.advertise("platform_ibvs/output_image", 2);
 
@@ -71,7 +71,6 @@ void MarkerDetector::fiducialTransformsCallback(
 
 void MarkerDetector::cameraInfoCallback(
     const sensor_msgs::CameraInfo::ConstPtr& msg) {
-    
     if (!camera_info_received_) {
         camera_f_x_ = msg->K[0];  // fx
         camera_f_y_ = msg->K[4];  // fy

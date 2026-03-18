@@ -1,11 +1,9 @@
 <?xml version="1.0"?>
 <launch>
   <!-- Minimal launch file for platform IBVS -->
-  <!-- Use this for testing with custom topics -->
-
-  <arg name="marker_id" default="0" />
-  <arg name="desired_depth" default="1.0" />
-  <arg name="control_freq" default="50" />
+  <!-- Default params are loaded from config/platform_ibvs_params.yaml.      -->
+  <!-- Use the args below to override individual values at the command line:   -->
+  <!--   roslaunch dynamic_ibvs minimal.launch marker_id:=5 takeoff_altitude:=3.0 -->
 
   <node
     pkg="dynamic_ibvs"
@@ -13,9 +11,16 @@
     name="platform_ibvs"
     output="screen"
   >
-    <param name="tracking_marker_id" value="$(arg marker_id)" />
-    <param name="desired_depth" value="$(arg desired_depth)" />
-    <param name="control_frequency" value="$(arg control_freq)" />
+    <!-- Load all default parameters from the YAML file -->
+    <rosparam
+      file="$(find dynamic_ibvs)/config/platform_ibvs_params.yaml"
+      command="load"
+    />
+
+    <remap from="cmd_vel" to="/mavlink/set_velocity/cmd_vel" />
+
+
+
   </node>
 
 </launch>

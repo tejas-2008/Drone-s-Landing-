@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(dynamic_ibvs)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(catkin REQUIRED COMPONENTS
@@ -12,6 +12,7 @@ find_package(catkin REQUIRED COMPONENTS
   fiducial_msgs
   cv_bridge
   image_transport
+  mavros_msgs
 )
 
 find_package(OpenCV REQUIRED)
@@ -22,7 +23,7 @@ set(Armadillo_LIBRARIES ${ARMADILLO_LIBRARIES})
 
 catkin_package(
   INCLUDE_DIRS include
-  CATKIN_DEPENDS roscpp std_msgs geometry_msgs sensor_msgs fiducial_msgs cv_bridge image_transport
+  CATKIN_DEPENDS roscpp std_msgs geometry_msgs sensor_msgs fiducial_msgs cv_bridge image_transport mavros_msgs
   DEPENDS OpenCV Armadillo
 )
 

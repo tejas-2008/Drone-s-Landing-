@@ -1,29 +1,19 @@
-# Platform IBVS Controller Parameters
+# ── Marker detection ──────────────────────────────────────────────────────────
+tracking_marker_id: 999   # ArUco marker ID on the landing platform
+marker_size: 0.725        # Physical side length of the marker [m]
 
-# Tracking Configuration
-tracking_marker_id: 999          # ID of the ArUco marker to track
+# ── IBVS control law ──────────────────────────────────────────────────────────
+control_frequency: 50.0   # Main control loop rate [Hz]
+error_threshold: 0.05     # Feature error norm to declare "acquired"
+max_linear_velocity: 1.5  # Velocity saturation limit per axis [m/s]
+max_angular_velocity: 1.0 # Yaw rate saturation limit [rad/s]
+desired_depth: 2.5        # Desired camera-to-marker distance [m]
 
-# Depth and Geometry
-desired_depth: 1.0             # Desired tracking distance (meters)
+# ── Flight setup ──────────────────────────────────────────────────────────────
+auto_switch_to_offboard: true  # Request OFFBOARD mode automatically
+takeoff_altitude: 3.5          # Target altitude before IBVS starts [m AGL]
+takeoff_climb_velocity: 0.5    # Climb rate during takeoff phase [m/s]
 
-# Control Loop
-control_frequency: 50.0        # Control loop frequency (Hz)
-
-# Convergence Criteria
-error_threshold: 0.05          # Threshold for convergence (normalized units)
-
-# Velocity Limits
-max_linear_velocity: 0.5       # Maximum linear velocity (m/s)
-max_angular_velocity: 1.0      # Maximum angular velocity (rad/s)
-
-# IBVS Controller Parameters
-lambda_min: 0.5                # Minimum adaptive gain
-lambda_max: 1.25               # Maximum adaptive gain
-
-# Marker Detection
-min_markers_for_init: 1        # Minimum markers required for initialization
-max_loss_count: 5              # Maximum consecutive losses before stopping
-
-# Logging
-debug_logging: false           # Enable detailed debug logging
-visualize_features: true       # Publish annotated images
+# ── Adaptive gain (read by IBVSController if supported) ───────────────────────
+lambda_min: 0.5   # Minimum adaptive gain
+lambda_max: 1.25  # Maximum adaptive gain

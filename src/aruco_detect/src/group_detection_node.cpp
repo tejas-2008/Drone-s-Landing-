@@ -3,7 +3,8 @@
 #include <sensor_msgs/CameraInfo.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <geometry_msgs/PoseStamped.h>
-#include <geometry_msgs/PoseArray.h>
+#include <fiducial_msgs/FiducialTransformArray.h>
+#include <fiducial_msgs/FiducialTransform.h>
 #include <cv_bridge/cv_bridge.h>
 #include <image_transport/image_transport.h>
 #include <opencv2/aruco.hpp>
@@ -177,7 +178,7 @@ public:
         // Publishers defined 
         pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("platform_pose", 10);
         vertices_pub_ = nh_.advertise<fiducial_msgs::FiducialArray>("fiducial_vertices", 10);
-        fiducial_transforms_pub_ = nh_.advertise<geometry_msgs::PoseArray>("fiducial_transforms", 10);
+        fiducial_transforms_pub_ = nh_.advertise<fiducial_msgs::FiducialTransformArray>("fiducial_transforms", 10);
         image_pub_ = it_.advertise("fiducial_images", 10);
 
         ROS_INFO("Aruco Group Detector initialized for group '%s'", platform_frame_id_.c_str());
@@ -240,7 +241,7 @@ public:
                     vertices_msg.image_seq = rgb_msg->header.seq;
 
                     // Store fiducial transforms
-                    geometry_msgs::PoseArray fiducial_transforms;
+                    fiducial_msgs::FiducialTransformArray fiducial_transforms;
                     fiducial_transforms.header = rgb_msg->header;
 
                     // Compute bounding box of all detected markers for platform vertices
@@ -335,15 +336,16 @@ public:
                                 tf_broadcaster_.sendTransform(marker_transform);
 
                                 // Add to fiducial transforms
-                                geometry_msgs::Pose marker_pose;
-                                marker_pose.position.x = marker_tvec[0];
-                                marker_pose.position.y = marker_tvec[1];
-                                marker_pose.position.z = marker_tvec[2];
-                                marker_pose.orientation.x = marker_tf_quat.x();
-                                marker_pose.orientation.y = marker_tf_quat.y();
-                                marker_pose.orientation.z = marker_tf_quat.z();
-                                marker_pose.orientation.w = marker_tf_quat.w();
-                                fiducial_transforms.poses.push_back(marker_pose);
+                                fiducial_msgs::FiducialTransform ft;
+                                ft.fiducial_id = ids[i];
+                                ft.transform.translation.x = marker_tvec[0];
+                                ft.transform.translation.y = marker_tvec[1];
+                                ft.transform.translation.z = marker_tvec[2];
+                                ft.transform.rotation.x = marker_tf_quat.x();
+                                ft.transform.rotation.y = marker_tf_quat.y();
+                                ft.transform.rotation.z = marker_tf_quat.z();
+                                ft.transform.rotation.w = marker_tf_quat.w();
+                                fiducial_transforms.transforms.push_back(ft);
                             }
                         }
                     }
