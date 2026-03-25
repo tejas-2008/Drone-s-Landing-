@@ -5,43 +5,48 @@
 #include <vector>
 #include <memory>
 
-
 /**
  * @class IBVSController
- * @brief Image-Based Visual Servoing controller using visual moments
- * 
- * This class implements the core IBVS control law based on visual moments
- * and marker corner features. It computes control velocities to minimize
- * visual feature error.
+ * @brief Image-Based Visual Servoing controller using visual moments.
+ *
+ * Changes vs. original:
+ *  - MarkerVelocity struct carries Kalman-estimated image-plane velocity
+ *    from MarkerDetector.
+ *  - computeControlLaw() accepts an optional MarkerVelocity feedforward term.
+ *    When provided, the estimated marker velocity is added to the feedback
+ *    output so the drone leads the target rather than chasing it.
+ *  - setDesiredFeatures() may be called every tick (dynamic desired mode).
  */
 class IBVSController {
 public:
-    /**
-     * @struct CameraIntrinsics
-     * @brief Camera calibration parameters
-     */
+    // ── Structs ───────────────────────────────────────────────────────────────
+
     struct CameraIntrinsics {
-        float f_x;      ///< Focal length in X direction
-        float f_y;      ///< Focal length in Y direction
-        float u_0;      ///< Principal point X coordinate
-        float v_0;      ///< Principal point Y coordinate
-        
+        float f_x, f_y;     ///< Focal lengths
+        float u_0, v_0;     ///< Principal point
         CameraIntrinsics() : f_x(0), f_y(0), u_0(0), v_0(0) {}
     };
 
-    /**
-     * @struct VisualFeatures
-     * @brief Visual feature point data
-     */
     struct VisualFeatures {
-        std::vector<float> x;   ///< X coordinates (pixel)
-        std::vector<float> y;   ///< Y coordinates (pixel)
+        std::vector<float> x;   ///< Pixel u coordinates (4 corners)
+        std::vector<float> y;   ///< Pixel v coordinates (4 corners)
     };
 
     /**
-     * @struct ControlOutput
-     * @brief Generated control velocities
+     * @struct MarkerVelocity
+     * @brief Kalman-estimated image-plane velocity of the tracked marker.
+     *
+     * All quantities are in normalised image coordinates per second.
+     * Supplied by MarkerDetector::getMarkerVelocity() and injected into
+     * computeControlLaw() as a feedforward term.
      */
+    struct MarkerVelocity {
+        float vx_centroid = 0.f; ///< Centroid velocity in X  [norm/s]
+        float vy_centroid = 0.f; ///< Centroid velocity in Y  [norm/s]
+        float v_area      = 0.f; ///< Rate of change of area  [norm/s]
+        float v_alpha     = 0.f; ///< Rate of change of angle [rad/s]
+    };
+
     struct ControlOutput {
         float v_x;          ///< Linear velocity X
         float v_y;          ///< Linear velocity Y
@@ -50,119 +55,75 @@ public:
         float error_norm;   ///< L2 norm of feature error
     };
 
-public:
+    // ── Public interface ──────────────────────────────────────────────────────
+
     IBVSController();
     virtual ~IBVSController() = default;
 
-    /**
-     * @brief Initialize camera intrinsics
-     * @param intrinsics Camera calibration parameters
-     */
+    /** Set camera intrinsics (call once after camera info is received). */
     void setActiveCamera(const CameraIntrinsics& intrinsics);
 
     /**
-     * @brief Set desired visual feature positions
-     * @param desired_features Desired feature point coordinates
-     * @param depth Desired depth for normalization
+     * Set desired visual feature positions.
+     * May be called every control tick when dynamic_desired mode is active —
+     * the desired corners stay at image centre so the error always reflects
+     * "how far is the marker from the centre right now".
      */
     void setDesiredFeatures(const VisualFeatures& desired_features, float depth);
 
     /**
-     * @brief Compute control law for current visual features
-     * @param current_features Current marker corner coordinates
-     * @param depth_estimate Current depth estimate
-     * @return ControlOutput with computed velocities and error
+     * Compute one step of the IBVS control law.
+     *
+     * @param current_features  Current marker corner pixel coordinates.
+     * @param depth_estimate    Estimated camera-to-marker distance [m].
+     * @param ff                Optional Kalman feedforward term.  Pass a
+     *                          zero-initialised struct when not available.
+     * @return ControlOutput    Saturate before publishing to MAVROS.
      */
-    ControlOutput computeControlLaw(const VisualFeatures& current_features, 
-                                    float depth_estimate);
+    ControlOutput computeControlLaw(const VisualFeatures& current_features,
+                                    float depth_estimate,
+                                    const MarkerVelocity& ff = MarkerVelocity{});
 
-    /**
-     * @brief Get current visual moments
-     * @return 4x4 centered moments matrix
-     */
+    /** Current 4x4 centred moments matrix (for diagnostics). */
     arma::mat getCurrentMoments() const { return centered_moments_current_; }
 
-    /**
-     * @brief Get current feature error
-     * @return 4-element error vector [x_err, y_err, area_err, orientation_err]
-     */
-    arma::vec getCurrentError() const { return error_; }
+    /** Current 4-element error vector [x, y, area, orientation]. */
+    arma::vec getCurrentError()   const { return error_; }
 
-    /**
-     * @brief Reset controller state
-     */
+    /** Reset adaptive gain state (call after marker loss or mode change). */
     void reset();
 
 private:
-    // Camera intrinsics
+    static const int NUM_FEATURES = 4;
+
     CameraIntrinsics camera_;
     bool camera_initialized_;
 
-    // Desired feature data
-    arma::mat desired_features_image_;      ///< Desired features in image coordinates
-    arma::mat desired_features_normalized_; ///< Desired features normalized by depth
-    arma::mat centered_moments_desired_;    ///< Centered moments for desired features
-    float desired_area_;                    ///< Desired feature area
-    float desired_centroid_x_;              ///< Desired centroid X
-    float desired_centroid_y_;              ///< Desired centroid Y
+    arma::mat desired_features_image_;
+    arma::mat desired_features_normalized_;
+    arma::mat centered_moments_desired_;
+    float desired_area_;
+    float desired_centroid_x_, desired_centroid_y_;
 
-    // Current feature data
-    arma::mat centered_moments_current_;    ///< Centered moments for current features
-    float current_centroid_x_;              ///< Current centroid X
-    float current_centroid_y_;              ///< Current centroid Y
-    float current_normalized_area_;         ///< Current normalized area
+    arma::mat centered_moments_current_;
+    float current_centroid_x_, current_centroid_y_;
+    float current_normalized_area_;
 
-    // Error and control
-    arma::vec error_;                       ///< Feature error vector
-    arma::mat jacobian_;                    ///< Visual Jacobian matrix
-    arma::mat jacobian_pinv_;               ///< Pseudo-inverse of Jacobian
-    arma::vec control_velocity_;            ///< Computed control velocity
+    arma::vec error_;
+    arma::mat jacobian_;
+    arma::mat jacobian_pinv_;
+    arma::vec control_velocity_;
 
-    // Control parameters
-    float error_norm_max_;                  ///< Initial error norm for gain adaptation
-    bool first_computation_;                ///< First computation flag for error normalization
+    float error_norm_max_;
+    bool  first_computation_;
 
-    /**
-     * @brief Compute centered moments for given feature points
-     * @param features Feature points (4x2 matrix)
-     * @return 4x4 centered moments matrix
-     */
     arma::mat computeCenteredMoments(const arma::mat& features);
-
-    /**
-     * @brief Extract centroid from features
-     * @param features Feature points (4x2 matrix)
-     * @param centroid_x Output centroid X coordinate
-     * @param centroid_y Output centroid Y coordinate
-     */
-    void extractCentroid(const arma::mat& features, 
-                        float& centroid_x, float& centroid_y);
-
-    /**
-     * @brief Compute visual Jacobian matrix
-     * @param current_area Current area estimate
-     * @param desired_area Desired area estimate
-     * @param current_centroid_x Current centroid X
-     * @param current_centroid_y Current centroid Y
-     * @param depth Current depth estimate
-     */
-    void computeJacobian(float current_area, float desired_area,
-                        float current_centroid_x, float current_centroid_y,
-                        float depth);
-
-    /**
-     * @brief Compute feature error
-     * @param current_features Current feature points (normalized)
-     * @param depth Current depth estimate
-     */
-    void computeError(const arma::mat& current_features, float depth);
-
-    /**
-     * @brief Compute time-varying adaptive gain
-     * @param current_error_norm Current error norm
-     * @return Adaptive gain value
-     */
-    float computeAdaptiveGain(float current_error_norm);
+    void      extractCentroid(const arma::mat& features,
+                              float& centroid_x, float& centroid_y);
+    void      computeJacobian(float current_area, float desired_area,
+                              float cx, float cy, float depth);
+    void      computeError(const arma::mat& current_features, float depth);
+    float     computeAdaptiveGain(float current_error_norm);
 };
 
 #endif // IBVS_CONTROLLER_HPP
