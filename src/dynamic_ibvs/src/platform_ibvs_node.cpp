@@ -12,788 +12,600 @@
 #include <std_srvs/SetBool.h>
 #include <vector>
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Startup state machine
+// ─────────────────────────────────────────────────────────────────────────────
 enum class StartupState
 {
-	WAITING_FOR_FCU,	 ///< No /mavros/state yet — FCU not connected
-	STREAMING_SETPOINTS, ///< Publishing zeros to prime PX4 watchdog
-	REQUESTING_OFFBOARD, ///< Calling /mavros/set_mode OFFBOARD
-	ARMING,				 ///< Calling /mavros/cmd/arming true
-	TAKING_OFF,			 ///< Climbing to takeoff_altitude_ at takeoff_climb_velocity_
-	READY				 ///< Armed + OFFBOARD at altitude — normal IBVS operation
+    WAITING_FOR_FCU,
+    STREAMING_SETPOINTS,
+    REQUESTING_OFFBOARD,
+    ARMING,
+    TAKING_OFF,
+    READY
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
 class PlatformIBVSNode
 {
 private:
-	ros::NodeHandle nh_;
-	std::unique_ptr<IBVSController> ibvs_controller_;
-	std::unique_ptr<MarkerDetector> marker_detector_;
+    ros::NodeHandle nh_;
+    std::unique_ptr<IBVSController>  ibvs_controller_;
+    std::unique_ptr<MarkerDetector>  marker_detector_;
 
-	ros::Timer control_timer_;
-	ros::Publisher velocity_pub_;
-	ros::Publisher
-		mavros_setpoint_pub_; // publishes directly to MAVROS for startup watchdog
-	ros::Subscriber mavros_state_sub_;
-	ros::Subscriber mavros_local_pos_sub_; // live altitude feedback
-	ros::ServiceClient set_mode_client_;
-	ros::ServiceClient arming_client_;
-	ros::ServiceServer ibvs_service_; // ~/enable_ibvs — start/stop IBVS loop
+    ros::Timer       control_timer_;
+    ros::Publisher   velocity_pub_;
+    ros::Publisher   mavros_setpoint_pub_;
+    ros::Subscriber  mavros_state_sub_;
+    ros::Subscriber  mavros_local_pos_sub_;
+    ros::ServiceClient set_mode_client_;
+    ros::ServiceClient arming_client_;
+    ros::ServiceServer ibvs_service_;
 
-	// Configuration parameters
-	int tracking_marker_id_;
-	float marker_size_;
-	float control_frequency_;
-	float error_threshold_;
-	float max_linear_velocity_;
-	float max_angular_velocity_;
-	float desired_depth_;
-	bool auto_switch_to_offboard_; // if true, node will call /mavros/set_mode to
-								   // switch to OFFBOARD automatically
-	float takeoff_altitude_;	   // target altitude for initial climb [m]
-	float takeoff_climb_velocity_; // upward velocity during takeoff [m/s]
+    // ── Parameters ────────────────────────────────────────────────────────────
+    int   tracking_marker_id_;
+    float marker_size_;
+    float control_frequency_;        // Hz — default 100
+    float error_threshold_;
+    float max_linear_velocity_;
+    float max_angular_velocity_;
+    float desired_depth_;
+    bool  auto_switch_to_offboard_;
+    float takeoff_altitude_;
+    float takeoff_climb_velocity_;
 
-	// State variables
-	bool initialized_;
-	bool tracking_;
-	int consecutive_loss_count_;
-	static constexpr int MAX_CONSECUTIVE_LOSSES = 5;
+    // Dynamic desired features mode:
+    //   true  → desired corners are always the image-centre rectangle (the drone
+    //           chases the marker by trying to keep it centred in frame).
+    //   false → desired corners are fixed at first initialisation (original behaviour).
+    bool  dynamic_desired_;
 
-	// Drone flight state (from MAVROS)
-	mavros_msgs::State drone_state_;
-	bool drone_state_received_;
-	bool was_ready_;					 // tracks previous iteration's readiness
-	ros::Time last_mode_switch_attempt_; // rate-limits set_mode service calls
-	ros::Time last_arm_attempt_;		 // rate-limits arming service calls
+    // Feedforward gain multiplier (0 = pure feedback, 1 = full feedforward).
+    // Set < 1 during tuning; increase as marker speed grows.
+    float ff_gain_;
 
-	// Local position (altitude feedback for takeoff)
-	float current_altitude_;  // latest Z from /mavros/local_position/pose [m]
-	bool local_pos_received_; // true once first local position msg is received
+    // ── State ──────────────────────────────────────────────────────────────────
+    bool initialized_;
+    bool tracking_;
 
-	// Startup sequence
-	StartupState startup_state_;							// current phase of the startup machine
-	ros::Time setpoint_stream_start_;						// when we started streaming setpoints
-	static constexpr double SETPOINT_STREAM_DURATION = 4.0; // seconds
+    // Loss handling — immediate reaction (no holdout counter).
+    // The drone holds position for up to hold_on_loss_sec_ before stopping IBVS.
+    ros::Time   last_valid_detection_;
+    float       hold_on_loss_sec_;   // how long to coast before giving up [s]
 
-	// IBVS service gate
-	bool ibvs_enabled_; // true only after ~/enable_ibvs is called with data=true
+    mavros_msgs::State drone_state_;
+    bool   drone_state_received_;
+    bool   was_ready_;
+    ros::Time last_mode_switch_attempt_;
+    ros::Time last_arm_attempt_;
+
+    float current_altitude_;
+    bool  local_pos_received_;
+
+    StartupState startup_state_;
+    ros::Time    setpoint_stream_start_;
+    static constexpr double SETPOINT_STREAM_DURATION = 4.0;
+
+    bool ibvs_enabled_;
 
 public:
-	PlatformIBVSNode()
-		: nh_("~"), tracking_marker_id_(0), marker_size_(0.1),
-		  control_frequency_(50.0), error_threshold_(0.05),
-		  max_linear_velocity_(0.5), max_angular_velocity_(1.0),
-		  desired_depth_(1.0), initialized_(false), tracking_(false),
-		  consecutive_loss_count_(0), drone_state_received_(false),
-		  was_ready_(false), last_mode_switch_attempt_(ros::Time(0)),
-		  last_arm_attempt_(ros::Time(0)), current_altitude_(0.0f),
-		  local_pos_received_(false),
-		  startup_state_(StartupState::WAITING_FOR_FCU),
-		  setpoint_stream_start_(ros::Time(0)), ibvs_enabled_(false)
-	{
-
-		// Load parameters
-		nh_.param("tracking_marker_id", tracking_marker_id_, 999);
-		nh_.param("marker_size", marker_size_, 0.25f);
-		nh_.param("control_frequency", control_frequency_, 50.0f);
-		nh_.param("error_threshold", error_threshold_, 0.05f);
-		nh_.param("max_linear_velocity", max_linear_velocity_, 0.5f);
-		nh_.param("max_angular_velocity", max_angular_velocity_, 1.0f);
-		nh_.param("desired_depth", desired_depth_, 1.0f);
-		nh_.param("auto_switch_to_offboard", auto_switch_to_offboard_, true);
-		nh_.param("takeoff_altitude", takeoff_altitude_, 2.5f);
-		nh_.param("takeoff_climb_velocity", takeoff_climb_velocity_, 0.5f);
-
-		ROS_INFO("PlatformIBVS: Loaded parameters - marker_id: %d, marker_size: "
-				 "%.3f m, freq: %.1f Hz",
-				 tracking_marker_id_, marker_size_, control_frequency_);
-
-		// Initialize components
-		marker_detector_ = std::make_unique<MarkerDetector>(&nh_);
-		ibvs_controller_ = std::make_unique<IBVSController>();
-
-		// Subscribe to MAVROS state for drone readiness
-		ros::NodeHandle global_nh, global_nh2;
-		mavros_state_sub_ = global_nh.subscribe("/mavros/state", 1, &PlatformIBVSNode::mavrosStateCallback, this);
-		mavros_local_pos_sub_ = global_nh.subscribe("/mavros/local_position/pose", 10, &PlatformIBVSNode::localPositionCallback, this);
-		set_mode_client_ = global_nh.serviceClient<mavros_msgs::SetMode>("/mavros/set_mode", /* persistent= */ true);
-		arming_client_ = global_nh.serviceClient<mavros_msgs::CommandBool>("/mavros/cmd/arming", /* persistent= */ true);
-		mavros_setpoint_pub_ = global_nh2.advertise<geometry_msgs::Twist>("/mavros/setpoint_velocity/cmd_vel_unstamped", 10);
-
-		// Fail fast if MAVROS is not running rather than silently dropping calls
-		ROS_INFO("PlatformIBVS: Waiting for MAVROS services...");
-		set_mode_client_.waitForExistence();
-		arming_client_.waitForExistence();
-		ROS_INFO("PlatformIBVS: MAVROS services found.");
-
-		// Setup velocity publisher
-		velocity_pub_ = nh_.advertise<geometry_msgs::Twist>("cmd_vel", 10);
-
-		// Setup control loop timer
-		control_timer_ = nh_.createTimer(ros::Duration(1.0 / control_frequency_), &PlatformIBVSNode::controlCallback, this);
-
-		ibvs_service_ = nh_.advertiseService("enable_ibvs", &PlatformIBVSNode::enableIBVSCallback, this);
-
-		ROS_INFO("PlatformIBVS: Node initialized. Auto-takeoff is enabled.");
-	}
-
-	bool enableIBVSCallback(std_srvs::SetBool::Request &req,
-							std_srvs::SetBool::Response &res)
-	{
-		if (req.data && !ibvs_enabled_)
-		{
-			ibvs_enabled_ = true;
-			ROS_INFO("PlatformIBVS: IBVS enabled.");
-		}
-		else if (!req.data && ibvs_enabled_)
-		{
-			ibvs_enabled_ = false;
-			ROS_INFO("PlatformIBVS: IBVS disabled.");
-		}
-		else
-		{
-			res.success = false;
-			return false;
-		}
-		res.success = true;
-		return true;
-	}
-
-	/**
-	 * @brief Estimate depth using camera matrix and marker corner geometry
-	 * Projects corners to normalized camera coordinates and uses known marker
-	 * size to compute accurate depth from multiple corner pair constraints
-	 *
-	 * @param marker Detected marker
-	 * @param camera_fx Camera focal length in x
-	 * @param camera_fy Camera focal length in y
-	 * @param camera_u0 Camera principal point u
-	 * @param camera_v0 Camera principal point v
-	 * @return Estimated depth in meters
-	 */
-	float estimateDepthFromCornersAndMatrix(
-		const std::shared_ptr<MarkerDetector::MarkerData> &marker,
-		float camera_fx, float camera_fy, float camera_u0, float camera_v0)
-	{
-
-		// Normalize pixel coordinates using camera matrix (inverse calibration)
-		// Normalized coordinates: x_n = (u - u0) / fx, y_n = (v - v0) / fy
-		float x0_norm = (marker->x0 - camera_u0) / camera_fx;
-		float y0_norm = (marker->y0 - camera_v0) / camera_fy;
-		float x1_norm = (marker->x1 - camera_u0) / camera_fx;
-		float y1_norm = (marker->y1 - camera_v0) / camera_fy;
-		float x2_norm = (marker->x2 - camera_u0) / camera_fx;
-		float y2_norm = (marker->y2 - camera_v0) / camera_fy;
-		float x3_norm = (marker->x3 - camera_u0) / camera_fx;
-		float y3_norm = (marker->y3 - camera_v0) / camera_fy;
-
-		// Calculate normalized distances between corners (actual marker has known
-		// size) Distance between corner 0 and 1 in normalized image plane
-		float d01_norm = std::sqrt(x1_norm * x1_norm + y1_norm * y1_norm -
-								   x0_norm * x0_norm - y0_norm * y0_norm +
-								   2 * (x0_norm * x1_norm + y0_norm * y1_norm));
-		// Better calculation: (p1 - p0) . (p1 - p0)
-		float dx01_norm = x1_norm - x0_norm;
-		float dy01_norm = y1_norm - y0_norm;
-		float d01_norm_proper =
-			std::sqrt(dx01_norm * dx01_norm + dy01_norm * dy01_norm);
-
-		// Distance between corner 3 and 0 (the other side)
-		float dx30_norm = x0_norm - x3_norm;
-		float dy30_norm = y0_norm - y3_norm;
-		float d30_norm = std::sqrt(dx30_norm * dx30_norm + dy30_norm * dy30_norm);
-
-		// Distance between corner 1 and 2 (opposite corner pair)
-		float dx12_norm = x2_norm - x1_norm;
-		float dy12_norm = y2_norm - y1_norm;
-		float d12_norm = std::sqrt(dx12_norm * dx12_norm + dy12_norm * dy12_norm);
-
-		// Calculate average normalized distance
-		float avg_d_norm = (d01_norm_proper + d30_norm + d12_norm) / 3.0f;
-
-		if (avg_d_norm < 1e-6)
-		{
-			ROS_WARN("PlatformIBVS: Invalid normalized marker distance. Using "
-					 "desired_depth.");
-			return desired_depth_;
-		}
-
-		// For best estimate, use the average normalized distance
-		float estimated_depth = marker_size_ / avg_d_norm;
-
-		// Sanity check - depth should be positive and reasonable (0.1m to 10m)
-		if (estimated_depth < 0.1f || estimated_depth > 10.0f)
-		{
-			ROS_WARN_THROTTLE(
-				1.0, "PlatformIBVS: Estimated depth %.3f m out of bounds. Clamping.",
-				estimated_depth);
-			estimated_depth = std::max(0.1f, std::min(10.0f, estimated_depth));
-		}
-
-		return estimated_depth;
-	}
-
-	void controlCallback(const ros::TimerEvent &)
-	{
-		if (!runStartupSequence())
-			return;
-		if (!checkReadiness())
-			return;
-
-		if (!ibvs_enabled_)
-		{
-			publishHoldSetpoint();
-			ROS_INFO_THROTTLE(
-				5.0,
-				"PlatformIBVS: Hovering at %.2f m. Call '~enable_ibvs' (data=true) "
-				"to start IBVS.",
-				current_altitude_);
-			return;
-		}
-		runIBVS();
-	}
-
-
-	/**
-	 * @brief Publish a zero-velocity setpoint directly to MAVROS.
-	 *
-	 * This feeds PX4's OFFBOARD setpoint watchdog during startup so PX4 is
-	 * already receiving setpoints before we ask it to switch to OFFBOARD mode.
-	 * It uses mavros_setpoint_pub_ (→
-	 * /mavros/setpoint_velocity/cmd_vel_unstamped) rather than velocity_pub_ (→
-	 * ~/cmd_vel) which only reaches downstream controllers and is invisible to
-	 * the PX4 watchdog.
-	 */
-	void publishHoldSetpoint()
-	{
-		geometry_msgs::Twist zero;
-		mavros_setpoint_pub_.publish(zero);
-	}
-
-	bool runStartupSequence()
-	{
-		if (startup_state_ == StartupState::READY)
-		{
-			return true;
-		}
-
-		switch (startup_state_)
-		{
-
-		case StartupState::WAITING_FOR_FCU:
-			// Don't stream setpoints yet — FCU isn't connected so they'd be dropped.
-			if (!drone_state_received_ || !drone_state_.connected)
-			{
-				ROS_INFO_THROTTLE(3.0,
-								  "PlatformIBVS: [1/4] Waiting for FCU connection...");
-				break;
-			}
-			ROS_INFO("PlatformIBVS: [1/4] FCU connected. Starting setpoint stream.");
-			setpoint_stream_start_ = ros::Time::now();
-			startup_state_ = StartupState::STREAMING_SETPOINTS;
-			break;
-
-		case StartupState::STREAMING_SETPOINTS:
-		{
-			// Actively stream zero-velocity directly into MAVROS so PX4's OFFBOARD
-			// watchdog sees a steady setpoint flow at our control rate (50 Hz).  PX4
-			// refuses to enter OFFBOARD if fewer than 2 messages/s have arrived.
-			publishHoldSetpoint();
-
-			double elapsed = (ros::Time::now() - setpoint_stream_start_).toSec();
-			ROS_INFO_THROTTLE(
-				0.5,
-				"PlatformIBVS: [2/4] Streaming hold setpoints to MAVROS "
-				"(%.1f / %.1f s)...",
-				elapsed, SETPOINT_STREAM_DURATION);
-			if (elapsed >= SETPOINT_STREAM_DURATION)
-			{
-				ROS_INFO("PlatformIBVS: [2/4] Watchdog satisfied. Requesting OFFBOARD "
-						 "mode.");
-				startup_state_ = StartupState::REQUESTING_OFFBOARD;
-			}
-			break;
-		}
-
-		case StartupState::REQUESTING_OFFBOARD:
-			// Keep streaming so the watchdog doesn't expire while we wait for the
-			// mode-switch ACK from PX4 (can take up to 3 s with SITL jitter).
-			publishHoldSetpoint();
-			if (drone_state_.mode == "OFFBOARD")
-			{
-				ROS_INFO("PlatformIBVS: [3/4] OFFBOARD confirmed. Arming...");
-				startup_state_ = StartupState::ARMING;
-				break;
-			}
-			requestOffboardMode();
-			break;
-
-		case StartupState::ARMING:
-			publishHoldSetpoint();
-			if (drone_state_.armed)
-			{
-				ROS_INFO("PlatformIBVS: [4/5] Armed. Starting takeoff to %.1f m.",
-						 takeoff_altitude_);
-				startup_state_ = StartupState::TAKING_OFF;
-				break;
-			}
-			requestArming();
-			break;
-
-		case StartupState::TAKING_OFF:
-		{
-			// Climb by publishing upward velocity directly into MAVROS.
-			// The PX4 position controller handles smooth deceleration as we near
-			// the target; we simply stop commanding climb once altitude is reached.
-			if (!local_pos_received_)
-			{
-				ROS_WARN_THROTTLE(2.0,
-								  "PlatformIBVS: [5/5] Waiting for local position...");
-				publishHoldSetpoint();
-				break;
-			}
-
-			const float altitude_tolerance = 0.15f; // ±15 cm
-			if (current_altitude_ >= takeoff_altitude_ - altitude_tolerance)
-			{
-				ROS_INFO(
-					"PlatformIBVS: [5/5] Reached %.2f m (target %.1f m). IBVS ready.",
-					current_altitude_, takeoff_altitude_);
-				startup_state_ = StartupState::READY;
-				publishHoldSetpoint();
-				break;
-			}
-
-			// Publish climb setpoint
-			geometry_msgs::Twist climb;
-			climb.linear.z = takeoff_climb_velocity_;
-			mavros_setpoint_pub_.publish(climb);
-			ROS_INFO_THROTTLE(
-				1.0, "PlatformIBVS: [5/5] Taking off... altitude=%.2f m / %.1f m",
-				current_altitude_, takeoff_altitude_);
-			break;
-		}
-
-		case StartupState::READY:
-			break; // handled by the early return above
-		}
-
-		return false; // still starting up
-	}
-
-	bool checkReadiness()
-	{
-		const bool ready_now = isDroneReady();
-
-		if (was_ready_ && !ready_now)
-		{
-			ROS_WARN(
-				"PlatformIBVS: Lost readiness (armed=%s, mode=%s). Recovering...",
-				drone_state_.armed ? "true" : "false", drone_state_.mode.c_str());
-			resetController();
-			startup_state_ = StartupState::REQUESTING_OFFBOARD;
-		}
-		else if (!was_ready_ && ready_now)
-		{
-			ROS_INFO("PlatformIBVS: Drone ready (mode=%s). IBVS active.",
-					 drone_state_.mode.c_str());
-		}
-
-		was_ready_ = ready_now;
-
-		if (!ready_now)
-		{
-			// Keep the PX4 watchdog alive even while recovering — if setpoints stop,
-			// PX4 cannot re-enter OFFBOARD when we request it again.
-			publishHoldSetpoint();
-		}
-
-		return ready_now;
-	}
-
-	/**
-	 * @brief Execute one tick of the IBVS control loop.
-	 *
-	 * Prerequisites (enforced by callers before this is invoked):
-	 *   - Drone is armed and in OFFBOARD mode.
-	 *   - Startup sequence is complete.
-	 */
-	void runIBVS()
-	{
-		// keep PX4 watchdog alive
-		if (!marker_detector_->hasCameraInfo())
-		{
-			ROS_WARN_THROTTLE(1.0, "PlatformIBVS: Waiting for camera info...");
-			publishHoldSetpoint();
-			return;
-		}
-		if (!initialized_)
-		{
-			initializeController();
-			publishHoldSetpoint();
-			return;
-		}
-
-		auto marker = marker_detector_->getMarkerById(tracking_marker_id_);
-
-		if (!marker)
-		{
-			if (++consecutive_loss_count_ > MAX_CONSECUTIVE_LOSSES)
-			{
-				tracking_ = false;
-				ROS_WARN_THROTTLE(1.0, "PlatformIBVS: Marker lost. Holding position.");
-			}
-			// Always send a hold setpoint — even a single missed tick can starve
-			// PX4's watchdog if the marker has been lost for several frames.
-			publishHoldSetpoint();
-			return;
-		}
-
-		consecutive_loss_count_ = 0;
-
-		IBVSController::VisualFeatures features;
-		features.x = {marker->x0, marker->x1, marker->x2, marker->x3};
-		features.y = {marker->y0, marker->y1, marker->y2, marker->y3};
-
-		float depth = estimateDepthFromCornersAndMatrix(
-			marker, marker_detector_->getCameraFx(),
-			marker_detector_->getCameraFy(), marker_detector_->getCameraU0(),
-			marker_detector_->getCameraV0());
-
-		ROS_INFO("{PlatformIBVS}: depth=%.4f", depth);
-
-		auto ctrl = ibvs_controller_->computeControlLaw(features, depth);
-
-		ROS_INFO_THROTTLE(1.0, "PlatformIBVS: err=%.4f  vx=%.3f vy=%.3f vz=%.3f ω=%.3f",
-				  ctrl.error_norm, ctrl.v_x, ctrl.v_y, ctrl.v_z, ctrl.omega_yaw);
-
-		if (ctrl.error_norm < error_threshold_ && !tracking_)
-		{
-			tracking_ = true;
-			ROS_INFO("{PlatformIBVS}: Marker acquired. Tracking initiated.");
-		}
-
-		sendVelocityCommand(
-			saturateVelocity(ctrl.v_x, max_linear_velocity_),
-			saturateVelocity(ctrl.v_y, max_linear_velocity_),
-			saturateVelocity(ctrl.v_z, max_linear_velocity_),
-			saturateVelocity(ctrl.omega_yaw, max_angular_velocity_));
-	}
-
-	/**
-	 * @brief Send velocity command to platform and to MAVROS.
-	 *
-	 * Publishes to both:
-	 *   - velocity_pub_        (~/cmd_vel)                           → downstream
-	 * controllers / visualization
-	 *   - mavros_setpoint_pub_ (/mavros/setpoint_velocity/cmd_vel_unstamped) →
-	 * PX4 watchdog
-	 *
-	 * Publishing every IBVS command to MAVROS directly ensures PX4's OFFBOARD
-	 * setpoint watchdog is always satisfied, preventing mode fallback to POSCTL.
-	 */
-	void sendVelocityCommand(float v_x, float v_y, float v_z, float omega_yaw)
-	{
-		geometry_msgs::Twist vel_cmd;
-		vel_cmd.linear.x = -v_y;
-		vel_cmd.linear.y = -v_x;
-		vel_cmd.linear.z = -v_z;
-		vel_cmd.angular.x = 0;
-		vel_cmd.angular.y = 0;
-		vel_cmd.angular.z = -omega_yaw;
-
-		velocity_pub_.publish(vel_cmd);		   // local/downstream topic
-		mavros_setpoint_pub_.publish(vel_cmd); // directly into PX4 watchdog
-
-		ROS_DEBUG("PlatformIBVS: cmd vx=%.3f vy=%.3f vz=%.3f ω=%.3f", -v_y, -v_x, -v_z,
-				  -omega_yaw);
-	}
-
-private:
-	/**
-	 * @brief Callback to cache the latest MAVROS flight state
-	 */
-	void mavrosStateCallback(const mavros_msgs::State::ConstPtr &msg)
-	{
-		drone_state_ = *msg;
-		if (!drone_state_received_)
-		{
-			drone_state_received_ = true;
-			ROS_INFO("PlatformIBVS: MAVROS state received - armed: %s, mode: %s",
-					 drone_state_.armed ? "true" : "false",
-					 drone_state_.mode.c_str());
-		}
-	}
-
-	/**
-	 * @brief Cache current altitude from local position estimate.
-	 *
-	 * The Z axis of /mavros/local_position/pose is up-positive in the
-	 * world/NED-converted frame, matching what PX4 uses for altitude setpoints.
-	 */
-	void localPositionCallback(const geometry_msgs::PoseStamped::ConstPtr &msg)
-	{
-		current_altitude_ = msg->pose.position.z;
-		if (!local_pos_received_)
-		{
-			local_pos_received_ = true;
-			ROS_INFO(
-				"PlatformIBVS: Local position received. Current altitude: %.2f m",
-				current_altitude_);
-		}
-	}
-
-	/**
-	 * @brief Request a switch to OFFBOARD mode via MAVROS.
-	 *        Rate-limited to once every 3 s to avoid hammering the FCU.
-	 */
-	void requestOffboardMode()
-	{
-		if (!auto_switch_to_offboard_)
-		{
-			ROS_WARN_THROTTLE(
-				2.0, "PlatformIBVS: auto_switch_to_offboard is false. "
-					 "Switch to OFFBOARD manually or set the param to true.");
-			return;
-		}
-
-		const ros::Duration SWITCH_COOLDOWN(3.0);
-		if ((ros::Time::now() - last_mode_switch_attempt_) < SWITCH_COOLDOWN)
-		{
-			ROS_INFO_THROTTLE(
-				1.0,
-				"PlatformIBVS: [3/4] Waiting for OFFBOARD mode (current: '%s')...",
-				drone_state_.mode.c_str());
-			return;
-		}
-		last_mode_switch_attempt_ = ros::Time::now();
-
-		ROS_INFO("PlatformIBVS: [3/4] Requesting OFFBOARD mode (current: '%s')...",
-				 drone_state_.mode.c_str());
-
-		mavros_msgs::SetMode srv;
-		srv.request.custom_mode = "OFFBOARD";
-
-		if (set_mode_client_.call(srv))
-		{
-			if (srv.response.mode_sent)
-			{
-				ROS_INFO("PlatformIBVS: OFFBOARD mode request accepted by FCU.");
-			}
-			else
-			{
-				ROS_WARN("PlatformIBVS: SetMode called but mode_sent=false. "
-						 "FCU rejected — setpoint stream may not be ready yet.");
-			}
-		}
-		else
-		{
-			ROS_ERROR("PlatformIBVS: /mavros/set_mode service call failed. Is MAVROS "
-					  "running?");
-		}
-	}
-
-	/**
-	 * @brief Arm the drone via MAVROS.
-	 *        Rate-limited to once every 3 s to avoid hammering the FCU.
-	 */
-	void requestArming()
-	{
-		const ros::Duration ARM_COOLDOWN(3.0);
-		if ((ros::Time::now() - last_arm_attempt_) < ARM_COOLDOWN)
-		{
-			ROS_INFO_THROTTLE(
-				1.0, "PlatformIBVS: [4/4] Waiting for arming confirmation...");
-			return;
-		}
-		last_arm_attempt_ = ros::Time::now();
-
-		ROS_INFO("PlatformIBVS: [4/4] Sending arm command...");
-
-		mavros_msgs::CommandBool srv;
-		srv.request.value = true;
-
-		if (arming_client_.call(srv))
-		{
-			if (srv.response.success)
-			{
-				ROS_INFO("PlatformIBVS: Arm command accepted by FCU.");
-			}
-			else
-			{
-				ROS_WARN("PlatformIBVS: Arm command rejected by FCU. "
-						 "Check pre-arm checks (GPS, RC, etc.).");
-			}
-		}
-		else
-		{
-			ROS_ERROR("PlatformIBVS: /mavros/cmd/arming service call failed. Is "
-					  "MAVROS running?");
-		}
-	}
-
-	/**
-	 * @brief Diagnose and log the specific reason the drone is not ready.
-	 *        Call this whenever isDroneReady() returns false for useful output.
-	 */
-	void logNotReadyReason() const
-	{
-		if (!drone_state_received_)
-		{
-			ROS_WARN(
-				"PlatformIBVS: No /mavros/state received. FCU may be disconnected.");
-			return;
-		}
-		if (!drone_state_.armed)
-		{
-			ROS_WARN("PlatformIBVS: Drone is disarmed.");
-			return;
-		}
-		ROS_WARN(
-			"PlatformIBVS: Flight mode '%s' does not accept velocity commands. "
-			"Switch to OFFBOARD mode (PX4).",
-			drone_state_.mode.c_str());
-	}
-
-	/**
-	 * @brief Check whether the drone is ready to accept velocity commands.
-	 *
-	 * Conditions:
-	 *   1. A MAVROS state message has been received (FCU is connected).
-	 *   2. The drone is armed.
-	 *   3. The flight mode is one that accepts external velocity setpoints
-	 *      (GUIDED for ArduPilot, OFFBOARD for PX4).
-	 *
-	 * @return true if all conditions are met, false otherwise.
-	 */
-	bool isDroneReady() const
-	{
-		if (!drone_state_received_)
-		{
-			return false; // No state from FCU yet
-		}
-		if (!drone_state_.armed)
-		{
-			return false; // Motors are off
-		}
-		const std::string &mode = drone_state_.mode;
-		// PX4 mode that accepts external velocity setpoints
-		bool mode_ok = (mode == "OFFBOARD");
-		return mode_ok;
-	}
-
-	/**
-	 * @brief Initialize IBVS controller with desired features
-	 */
-	void initializeController()
-	{
-		// Set camera intrinsics
-		IBVSController::CameraIntrinsics intrinsics;
-		intrinsics.f_x = marker_detector_->getCameraFx();
-		intrinsics.f_y = marker_detector_->getCameraFy();
-		intrinsics.u_0 = marker_detector_->getCameraU0();
-		intrinsics.v_0 = marker_detector_->getCameraV0();
-
-		ibvs_controller_->setActiveCamera(intrinsics);
-
-		// Set desired features (centered on image)
-		IBVSController::VisualFeatures desired_features;
-		float cx = intrinsics.u_0;
-		float cy = intrinsics.v_0;
-		float w = 80.0f; // Half-width of desired marker region
-		float h = 80.0f; // Half-height of desired marker region
-
-		desired_features.x = {cx - w, cx - w, cx + w, cx + w};
-		desired_features.y = {cy + h, cy - h, cy - h, cy + h};
-
-		ibvs_controller_->setDesiredFeatures(desired_features, desired_depth_);
-
-		initialized_ = true;
-		ROS_INFO("PlatformIBVS: Controller initialized with desired features "
-				 "centered at (%.0f, %.0f)",
-				 cx, cy);
-	}
-
-	/**
-	 * @brief Saturate velocity to maximum limits with direction preservation
-	 */
-	float saturateVelocity(float velocity, float max_value)
-	{
-		if (std::abs(velocity) > max_value)
-		{
-			return (velocity > 0) ? max_value : -max_value;
-		}
-		return velocity;
-	}
-
-	/**
-	 * @brief Stop platform motion
-	 */
-	void stopMotion() { sendVelocityCommand(0.0f, 0.0f, 0.0f, 0.0f); }
-
-	/**
-	 * @brief Reset IBVS controller state.
-	 *        Called when the drone loses readiness mid-flight so the controller
-	 *        starts fresh on recovery. Does NOT reset the startup state machine
-	 *        (the caller is responsible for stepping it back appropriately).
-	 */
-	void resetController()
-	{
-		initialized_ = false;
-		tracking_ = false;
-		consecutive_loss_count_ = 0;
-		ibvs_controller_->reset();
-		ROS_INFO("PlatformIBVS: IBVS controller reset.");
-	}
+    // ─────────────────────────────────────────────────────────────────────────
+    PlatformIBVSNode()
+        : nh_("~"),
+          tracking_marker_id_(0), marker_size_(0.1),
+          control_frequency_(100.0),     // ← 100 Hz default
+          error_threshold_(0.05),
+          max_linear_velocity_(0.5), max_angular_velocity_(1.0),
+          desired_depth_(1.0),
+          auto_switch_to_offboard_(true),
+          takeoff_altitude_(2.5f), takeoff_climb_velocity_(0.5f),
+          dynamic_desired_(true),        // ← track dynamically by default
+          ff_gain_(1.0f),                // applied inside controller; tunable
+          initialized_(false), tracking_(false),
+          hold_on_loss_sec_(0.1f),       // ← 100 ms coast window (was 5 frames)
+          drone_state_received_(false), was_ready_(false),
+          last_mode_switch_attempt_(ros::Time(0)),
+          last_arm_attempt_(ros::Time(0)),
+          current_altitude_(0.f), local_pos_received_(false),
+          startup_state_(StartupState::WAITING_FOR_FCU),
+          setpoint_stream_start_(ros::Time(0)),
+          ibvs_enabled_(false)
+    {
+        // Load parameters
+        nh_.param("tracking_marker_id",    tracking_marker_id_,    999);
+        nh_.param("marker_size",           marker_size_,           0.25f);
+        nh_.param("control_frequency",     control_frequency_,     100.0f);
+        nh_.param("error_threshold",       error_threshold_,       0.05f);
+        nh_.param("max_linear_velocity",   max_linear_velocity_,   0.5f);
+        nh_.param("max_angular_velocity",  max_angular_velocity_,  1.0f);
+        nh_.param("desired_depth",         desired_depth_,         1.0f);
+        nh_.param("auto_switch_to_offboard", auto_switch_to_offboard_, true);
+        nh_.param("takeoff_altitude",      takeoff_altitude_,      2.5f);
+        nh_.param("takeoff_climb_velocity",takeoff_climb_velocity_, 0.5f);
+        nh_.param("dynamic_desired",       dynamic_desired_,       true);
+        nh_.param("ff_gain",               ff_gain_,               1.0f);
+        nh_.param("hold_on_loss_sec",      hold_on_loss_sec_,      0.10f);
+
+        ROS_INFO("PlatformIBVS: freq=%.0f Hz  dynamic_desired=%s  ff_gain=%.2f  "
+                 "hold_on_loss=%.3f s",
+                 control_frequency_,
+                 dynamic_desired_ ? "true" : "false",
+                 ff_gain_, hold_on_loss_sec_);
+
+        marker_detector_  = std::make_unique<MarkerDetector>(&nh_);
+        ibvs_controller_  = std::make_unique<IBVSController>();
+
+        ros::NodeHandle global_nh, global_nh2;
+        mavros_state_sub_ = global_nh.subscribe(
+            "/mavros/state", 1,
+            &PlatformIBVSNode::mavrosStateCallback, this);
+        mavros_local_pos_sub_ = global_nh.subscribe(
+            "/mavros/local_position/pose", 10,
+            &PlatformIBVSNode::localPositionCallback, this);
+        set_mode_client_ = global_nh.serviceClient<mavros_msgs::SetMode>(
+            "/mavros/set_mode", true);
+        arming_client_ = global_nh.serviceClient<mavros_msgs::CommandBool>(
+            "/mavros/cmd/arming", true);
+        mavros_setpoint_pub_ = global_nh2.advertise<geometry_msgs::Twist>(
+            "/mavros/setpoint_velocity/cmd_vel_unstamped", 10);
+
+        ROS_INFO("PlatformIBVS: Waiting for MAVROS services...");
+        set_mode_client_.waitForExistence();
+        arming_client_.waitForExistence();
+        ROS_INFO("PlatformIBVS: MAVROS services found.");
+
+        velocity_pub_ = nh_.advertise<geometry_msgs::Twist>("cmd_vel", 10);
+
+        control_timer_ = nh_.createTimer(
+            ros::Duration(1.0 / control_frequency_),
+            &PlatformIBVSNode::controlCallback, this);
+
+        ibvs_service_ = nh_.advertiseService(
+            "enable_ibvs", &PlatformIBVSNode::enableIBVSCallback, this);
+
+        last_valid_detection_ = ros::Time::now();
+
+        ROS_INFO("PlatformIBVS: Node initialised.");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    bool enableIBVSCallback(std_srvs::SetBool::Request  &req,
+                             std_srvs::SetBool::Response &res)
+    {
+        if (req.data == ibvs_enabled_) { res.success = false; return false; }
+        ibvs_enabled_ = req.data;
+        ROS_INFO("PlatformIBVS: IBVS %s.", ibvs_enabled_ ? "enabled" : "disabled");
+        res.success = true;
+        return true;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Main timer callback
+    // ─────────────────────────────────────────────────────────────────────────
+    void controlCallback(const ros::TimerEvent &)
+    {
+        if (!runStartupSequence()) return;
+        if (!checkReadiness())    return;
+
+        if (!ibvs_enabled_)
+        {
+            publishHoldSetpoint();
+            ROS_INFO_THROTTLE(5.0,
+                "PlatformIBVS: Hovering at %.2f m. Call '~enable_ibvs' to start IBVS.",
+                current_altitude_);
+            return;
+        }
+        runIBVS();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  IBVS loop — called at control_frequency_ Hz
+    // ─────────────────────────────────────────────────────────────────────────
+    void runIBVS()
+    {
+        if (!marker_detector_->hasCameraInfo())
+        {
+            ROS_WARN_THROTTLE(1.0, "PlatformIBVS: Waiting for camera info...");
+            publishHoldSetpoint();
+            return;
+        }
+
+        // ── Initialise / refresh desired features ────────────────────────────
+        // In dynamic_desired_ mode we call setDesiredFeatures() every tick so
+        // the desired position stays at image centre regardless of past state.
+        // This is what lets the drone follow a moving target — the error is
+        // always "how far is the marker from the image centre right now".
+        if (!initialized_ || dynamic_desired_)
+        {
+            initializeController();
+            if (!initialized_) { publishHoldSetpoint(); return; }
+        }
+
+        // ── Marker detection ─────────────────────────────────────────────────
+        auto marker = marker_detector_->getMarkerById(tracking_marker_id_);
+
+        if (!marker)
+        {
+            // No detection this tick — check how long we've been without one.
+            double loss_duration =
+                (ros::Time::now() - last_valid_detection_).toSec();
+
+            if (loss_duration > hold_on_loss_sec_)
+            {
+                tracking_ = false;
+                ROS_WARN_THROTTLE(1.0,
+                    "PlatformIBVS: Marker lost for %.2f s. Holding position.",
+                    loss_duration);
+            }
+            // Always hold — never send stale velocity while marker is gone.
+            publishHoldSetpoint();
+            return;
+        }
+
+        // Valid detection — reset loss timer.
+        last_valid_detection_ = ros::Time::now();
+
+        // ── Build current features ───────────────────────────────────────────
+        IBVSController::VisualFeatures features;
+        features.x = {marker->x0, marker->x1, marker->x2, marker->x3};
+        features.y = {marker->y0, marker->y1, marker->y2, marker->y3};
+
+        // ── Depth estimate ───────────────────────────────────────────────────
+        float depth = estimateDepthFromCornersAndMatrix(
+            marker,
+            marker_detector_->getCameraFx(), marker_detector_->getCameraFy(),
+            marker_detector_->getCameraU0(), marker_detector_->getCameraV0());
+
+        // ── Kalman feedforward ───────────────────────────────────────────────
+        // getMarkerVelocity() returns the Kalman-estimated image-plane velocity.
+        // The controller adds ff_gain * velocity to the feedback command so the
+        // drone anticipates where the marker is heading rather than always
+        // reacting one control period late.
+        IBVSController::MarkerVelocity ff =
+            marker_detector_->getMarkerVelocity(tracking_marker_id_);
+
+        // Scale by user-tunable ff_gain parameter
+        ff.vx_centroid *= ff_gain_;
+        ff.vy_centroid *= ff_gain_;
+        ff.v_area      *= ff_gain_;
+        ff.v_alpha     *= ff_gain_;
+
+        // ── Control law ──────────────────────────────────────────────────────
+        auto ctrl = ibvs_controller_->computeControlLaw(features, depth, ff);
+
+        ROS_INFO_THROTTLE(1.0,
+            "PlatformIBVS: err=%.4f  vx=%.3f vy=%.3f vz=%.3f ω=%.3f  depth=%.3f",
+            ctrl.error_norm,
+            ctrl.v_x, ctrl.v_y, ctrl.v_z, ctrl.omega_yaw,
+            depth);
+
+        if (ctrl.error_norm < error_threshold_ && !tracking_)
+        {
+            tracking_ = true;
+            ROS_INFO("PlatformIBVS: Marker acquired. Tracking.");
+        }
+
+        sendVelocityCommand(
+            saturateVelocity(ctrl.v_x,       max_linear_velocity_),
+            saturateVelocity(ctrl.v_y,       max_linear_velocity_),
+            saturateVelocity(ctrl.v_z,       max_linear_velocity_),
+            saturateVelocity(ctrl.omega_yaw, max_angular_velocity_));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Initialise (or refresh) the desired feature set
+    // ─────────────────────────────────────────────────────────────────────────
+    void initializeController()
+    {
+        if (!marker_detector_->hasCameraInfo()) return;
+
+        IBVSController::CameraIntrinsics intrinsics;
+        intrinsics.f_x = marker_detector_->getCameraFx();
+        intrinsics.f_y = marker_detector_->getCameraFy();
+        intrinsics.u_0 = marker_detector_->getCameraU0();
+        intrinsics.v_0 = marker_detector_->getCameraV0();
+        ibvs_controller_->setActiveCamera(intrinsics);
+
+        // Desired = centred square in image coordinates.
+        // Called every tick in dynamic mode so the controller always tries to
+        // bring the marker to the image centre — the drone translates to follow.
+        float cx = intrinsics.u_0, cy = intrinsics.v_0;
+        float w  = 80.f, h = 80.f;
+
+        IBVSController::VisualFeatures desired;
+        desired.x = {cx-w, cx-w, cx+w, cx+w};
+        desired.y = {cy+h, cy-h, cy-h, cy+h};
+        ibvs_controller_->setDesiredFeatures(desired, desired_depth_);
+
+        if (!initialized_)
+        {
+            initialized_ = true;
+            ROS_INFO("PlatformIBVS: Controller initialised. dynamic_desired=%s",
+                     dynamic_desired_ ? "true" : "false");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Depth estimation from corner geometry (unchanged from original)
+    // ─────────────────────────────────────────────────────────────────────────
+    float estimateDepthFromCornersAndMatrix(
+        const std::shared_ptr<MarkerDetector::MarkerData> &marker,
+        float fx, float fy, float u0, float v0)
+    {
+        auto norm = [&](float u, float v, float &xn, float &yn) {
+            xn = (u - u0) / fx;
+            yn = (v - v0) / fy;
+        };
+
+        float x0n, y0n, x1n, y1n, x2n, y2n, x3n, y3n;
+        norm(marker->x0, marker->y0, x0n, y0n);
+        norm(marker->x1, marker->y1, x1n, y1n);
+        norm(marker->x2, marker->y2, x2n, y2n);
+        norm(marker->x3, marker->y3, x3n, y3n);
+
+        auto dist = [](float ax, float ay, float bx, float by) {
+            float dx = bx-ax, dy = by-ay;
+            return std::sqrt(dx*dx + dy*dy);
+        };
+
+        float d01 = dist(x0n, y0n, x1n, y1n);
+        float d12 = dist(x1n, y1n, x2n, y2n);
+        float d30 = dist(x3n, y3n, x0n, y0n);
+        float avg  = (d01 + d12 + d30) / 3.0f;
+
+        if (avg < 1e-6f)
+        {
+            ROS_WARN("PlatformIBVS: Invalid marker distance. Using desired_depth.");
+            return desired_depth_;
+        }
+
+        float depth = marker_size_ / avg;
+        depth = std::max(0.1f, std::min(10.0f, depth));
+        return depth;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Startup state machine (unchanged logic from original)
+    // ─────────────────────────────────────────────────────────────────────────
+    bool runStartupSequence()
+    {
+        if (startup_state_ == StartupState::READY) return true;
+
+        switch (startup_state_)
+        {
+        case StartupState::WAITING_FOR_FCU:
+            if (!drone_state_received_ || !drone_state_.connected)
+            {
+                ROS_INFO_THROTTLE(3.0, "PlatformIBVS: [1/5] Waiting for FCU...");
+                break;
+            }
+            ROS_INFO("PlatformIBVS: [1/5] FCU connected.");
+            setpoint_stream_start_ = ros::Time::now();
+            startup_state_ = StartupState::STREAMING_SETPOINTS;
+            break;
+
+        case StartupState::STREAMING_SETPOINTS:
+        {
+            publishHoldSetpoint();
+            double elapsed = (ros::Time::now() - setpoint_stream_start_).toSec();
+            ROS_INFO_THROTTLE(0.5,
+                "PlatformIBVS: [2/5] Streaming setpoints (%.1f/%.1f s)...",
+                elapsed, SETPOINT_STREAM_DURATION);
+            if (elapsed >= SETPOINT_STREAM_DURATION)
+            {
+                startup_state_ = StartupState::REQUESTING_OFFBOARD;
+                ROS_INFO("PlatformIBVS: [2/5] Requesting OFFBOARD.");
+            }
+            break;
+        }
+
+        case StartupState::REQUESTING_OFFBOARD:
+            publishHoldSetpoint();
+            if (drone_state_.mode == "OFFBOARD")
+            {
+                ROS_INFO("PlatformIBVS: [3/5] OFFBOARD confirmed. Arming...");
+                startup_state_ = StartupState::ARMING;
+                break;
+            }
+            requestOffboardMode();
+            break;
+
+        case StartupState::ARMING:
+            publishHoldSetpoint();
+            if (drone_state_.armed)
+            {
+                ROS_INFO("PlatformIBVS: [4/5] Armed. Taking off to %.1f m.",
+                         takeoff_altitude_);
+                startup_state_ = StartupState::TAKING_OFF;
+                break;
+            }
+            requestArming();
+            break;
+
+        case StartupState::TAKING_OFF:
+        {
+            if (!local_pos_received_)
+            { publishHoldSetpoint(); break; }
+
+            const float tol = 0.15f;
+            if (current_altitude_ >= takeoff_altitude_ - tol)
+            {
+                ROS_INFO("PlatformIBVS: [5/5] At %.2f m. READY.", current_altitude_);
+                startup_state_ = StartupState::READY;
+                publishHoldSetpoint();
+                break;
+            }
+            geometry_msgs::Twist climb;
+            climb.linear.z = takeoff_climb_velocity_;
+            mavros_setpoint_pub_.publish(climb);
+            ROS_INFO_THROTTLE(1.0,
+                "PlatformIBVS: [5/5] Climbing... %.2f m / %.1f m",
+                current_altitude_, takeoff_altitude_);
+            break;
+        }
+
+        case StartupState::READY:
+            break;
+        }
+        return false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    bool checkReadiness()
+    {
+        bool ready_now = isDroneReady();
+
+        if (was_ready_ && !ready_now)
+        {
+            ROS_WARN("PlatformIBVS: Lost readiness. Recovering...");
+            resetController();
+            startup_state_ = StartupState::REQUESTING_OFFBOARD;
+        }
+        was_ready_ = ready_now;
+        if (!ready_now) publishHoldSetpoint();
+        return ready_now;
+    }
+
+    bool isDroneReady() const
+    {
+        return drone_state_received_ &&
+               drone_state_.armed &&
+               drone_state_.mode == "OFFBOARD";
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Velocity output
+    // ─────────────────────────────────────────────────────────────────────────
+    void sendVelocityCommand(float vx, float vy, float vz, float omega)
+    {
+        geometry_msgs::Twist cmd;
+        // IBVS camera frame → PX4 body frame
+        cmd.linear.x  = -vy;
+        cmd.linear.y  = -vx;
+        cmd.linear.z  = -vz;
+        cmd.angular.z = -omega;
+
+        velocity_pub_.publish(cmd);
+        mavros_setpoint_pub_.publish(cmd);
+    }
+
+    void publishHoldSetpoint()
+    {
+        geometry_msgs::Twist zero;
+        mavros_setpoint_pub_.publish(zero);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    float saturateVelocity(float v, float limit)
+    {
+        return std::abs(v) > limit ? (v > 0.f ? limit : -limit) : v;
+    }
+
+    void stopMotion() { sendVelocityCommand(0, 0, 0, 0); }
+
+    void resetController()
+    {
+        initialized_  = false;
+        tracking_     = false;
+        ibvs_controller_->reset();
+        last_valid_detection_ = ros::Time::now();
+        ROS_INFO("PlatformIBVS: Controller reset.");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  MAVROS helpers
+    // ─────────────────────────────────────────────────────────────────────────
+    void requestOffboardMode()
+    {
+        if (!auto_switch_to_offboard_)
+        {
+            ROS_WARN_THROTTLE(2.0, "PlatformIBVS: Set auto_switch_to_offboard=true "
+                              "or switch manually.");
+            return;
+        }
+        const ros::Duration COOLDOWN(3.0);
+        if ((ros::Time::now() - last_mode_switch_attempt_) < COOLDOWN)
+        {
+            ROS_INFO_THROTTLE(1.0, "PlatformIBVS: Waiting for OFFBOARD ack...");
+            return;
+        }
+        last_mode_switch_attempt_ = ros::Time::now();
+
+        mavros_msgs::SetMode srv;
+        srv.request.custom_mode = "OFFBOARD";
+        if (!set_mode_client_.call(srv))
+            ROS_ERROR("PlatformIBVS: /mavros/set_mode call failed.");
+        else if (!srv.response.mode_sent)
+            ROS_WARN("PlatformIBVS: mode_sent=false (setpoint stream not ready yet?).");
+    }
+
+    void requestArming()
+    {
+        const ros::Duration COOLDOWN(3.0);
+        if ((ros::Time::now() - last_arm_attempt_) < COOLDOWN) return;
+        last_arm_attempt_ = ros::Time::now();
+
+        mavros_msgs::CommandBool srv;
+        srv.request.value = true;
+        if (!arming_client_.call(srv))
+            ROS_ERROR("PlatformIBVS: /mavros/cmd/arming call failed.");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  ROS subscriber callbacks
+    // ─────────────────────────────────────────────────────────────────────────
+    void mavrosStateCallback(const mavros_msgs::State::ConstPtr &msg)
+    {
+        drone_state_ = *msg;
+        if (!drone_state_received_)
+        {
+            drone_state_received_ = true;
+            ROS_INFO("PlatformIBVS: MAVROS state received.");
+        }
+    }
+
+    void localPositionCallback(const geometry_msgs::PoseStamped::ConstPtr &msg)
+    {
+        current_altitude_ = msg->pose.position.z;
+        if (!local_pos_received_)
+        {
+            local_pos_received_ = true;
+            ROS_INFO("PlatformIBVS: Local position received. Alt=%.2f m",
+                     current_altitude_);
+        }
+    }
 };
 
-// Global node pointer for signal handling
+// ─────────────────────────────────────────────────────────────────────────────
+//  main
+// ─────────────────────────────────────────────────────────────────────────────
+
 static std::unique_ptr<PlatformIBVSNode> g_node;
-/**
- * @brief Signal handler for graceful shutdown
- */
-void signalHandler(int signum)
+
+void signalHandler(int sig)
 {
-	ROS_INFO("Received interrupt signal %d. Shutting down gracefully...", signum);
-	if (g_node)
-	{
-		g_node.reset();
-	}
-	ros::shutdown();
+    ROS_INFO("Signal %d received — shutting down.", sig);
+    g_node.reset();
+    ros::shutdown();
 }
 
 int main(int argc, char **argv)
 {
-	ros::init(argc, argv, "platform_ibvs_node");
+    ros::init(argc, argv, "platform_ibvs_node");
+    signal(SIGINT,  signalHandler);
+    signal(SIGTERM, signalHandler);
 
-	// Register signal handlers
-	signal(SIGINT, signalHandler);
-	signal(SIGTERM, signalHandler);
+    ROS_INFO("Starting Platform IBVS Node (moving-target edition)...");
+    try
+    {
+        g_node = std::make_unique<PlatformIBVSNode>();
+        // Four threads: control timer, /mavros/state, service reply, spare.
+        ros::AsyncSpinner spinner(4);
+        spinner.start();
+        ros::waitForShutdown();
+    }
+    catch (const std::exception &e)
+    { ROS_FATAL("Fatal: %s", e.what()); return 1; }
 
-	ROS_INFO("Starting Platform IBVS Node...");
-
-	try
-	{
-		g_node = std::unique_ptr<PlatformIBVSNode>(new PlatformIBVSNode());
-
-		// Use a multi-threaded spinner so that blocking MAVROS service calls
-		// (SetMode, CommandBool) do not starve the subscription callbacks that
-		// deliver the service responses.  With a single-threaded ros::spin() the
-		// timer callback blocks on set_mode_client_.call(), MAVROS cannot receive
-		// the reply on the same thread, and the MAVLink socket times out with
-		// "poll timeout 0, 22".  Four threads is more than enough:
-		//   • control timer callback
-		//   • /mavros/state subscriber
-		//   • service response receiver
-		//   • spare
-		ros::AsyncSpinner spinner(4);
-		spinner.start();
-		ros::waitForShutdown();
-	}
-	catch (const std::exception &e)
-	{
-		ROS_FATAL("Fatal error: %s", e.what());
-		return 1;
-	}
-
-	return 0;
+    return 0;
 }
