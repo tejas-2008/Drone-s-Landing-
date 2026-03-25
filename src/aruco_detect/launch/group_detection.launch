@@ -1,19 +1,39 @@
 <?xml version="1.0"?>
 <launch>
-    <!-- ArUco Group Detector Node -->
     <node name="group_detection" pkg="aruco_detect" type="group_detection_node" output="screen">
-        <!-- Remap topics from node subscription names to actual published topics -->
-        <remap from="/camera/rgb/image_raw" to="/iris_downward_depth_camera/camera/rgb/image_raw"/>
+
+        <!-- Camera remaps (unchanged) -->
+        <remap from="/camera/rgb/image_raw"   to="/iris_downward_depth_camera/camera/rgb/image_raw"/>
         <remap from="/camera/depth/image_raw" to="/iris_downward_depth_camera/camera/depth/image_raw"/>
         <remap from="/camera/rgb/camera_info" to="/iris_downward_depth_camera/camera/rgb/camera_info"/>
-        
-        <!-- Output topics -->
-        <remap from="platform_pose" to="platform_pose"/>
-        <remap from="/fiducial_images" to="/fiducial_images"/>
-        
-        <!-- Load parameters from config file -->
+
+        <!-- Output topics (unchanged) -->
+        <remap from="platform_pose"      to="platform_pose"/>
+        <remap from="/fiducial_images"   to="/fiducial_images"/>
+
+        <!-- Base detection config -->
         <rosparam command="load" file="$(find aruco_detect)/config/aruco_detect.yaml"/>
-        <param name="group_definition_file" value="$(find aruco_detect)/config/marker_groups.yaml"/>
-        
+        <param name="group_definition_file"
+               value="$(find aruco_detect)/config/marker_groups.yaml"/>
+
+        <!-- ── Tracking params ───────────────────────────────────────────── -->
+        <!--
+            max_tracking_duration [s]:
+              How long the KF will keep publishing ID 999 after the last valid
+              estimatePoseBoard. 2 s works for slow platforms; increase to 3-4 s
+              if the drone frequently overshoots and loses the platform during
+              high-speed cruise.
+
+            platform_half_size [m]:
+              Half the outer extent of the marker layout used for re-projection.
+              Derived from marker_groups.yaml:
+                corner markers at ±0.6 m, marker half-size = 0.125 m
+                → outer edge = 0.6 + 0.125 = 0.725 m
+              Update this if you change the platform layout.
+        -->
+        <param name="max_tracking_duration" value="2.0"/>
+        <param name="platform_half_size"    value="0.725"/>
+        <!-- ─────────────────────────────────────────────────────────────── -->
+
     </node>
 </launch>

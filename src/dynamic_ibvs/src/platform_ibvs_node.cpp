@@ -11,6 +11,15 @@
 #include <signal.h>
 #include <std_srvs/SetBool.h>
 #include <vector>
+#include <std_msgs/Float32.h>
+#include <std_msgs/Bool.h>
+
+// color definitions for console output
+#define COLOR_GREEN "\033[1;32m"
+#define COLOR_YELLOW "\033[1;33m"
+#define COLOR_BLUE "\033[1;34m"
+#define COLOR_PURPLE "\033[1;35m"
+#define COLOR_RESET "\033[0m"
 
 enum class StartupState
 {
@@ -31,16 +40,18 @@ private:
 
 	ros::Timer control_timer_;
 	ros::Publisher velocity_pub_;
-	ros::Publisher
-		mavros_setpoint_pub_; // publishes directly to MAVROS for startup watchdog
+	ros::Publisher mavros_setpoint_pub_, normal_error_pub_; // publishes directly to MAVROS for startup watchdog
 	ros::Subscriber mavros_state_sub_;
 	ros::Subscriber mavros_local_pos_sub_; // live altitude feedback
+	ros::Subscriber tracking_status_sub_;
+
 	ros::ServiceClient set_mode_client_;
 	ros::ServiceClient arming_client_;
 	ros::ServiceServer ibvs_service_; // ~/enable_ibvs — start/stop IBVS loop
 
 	// Configuration parameters
 	int tracking_marker_id_;
+	bool tracking_mode_ = false;     	
 	float marker_size_;
 	float control_frequency_;
 	float error_threshold_;
@@ -76,6 +87,7 @@ private:
 
 	// IBVS service gate
 	bool ibvs_enabled_; // true only after ~/enable_ibvs is called with data=true
+	static constexpr float TRACKING_VELOCITY_SCALE = 1.25f;
 
 public:
 	PlatformIBVSNode()
@@ -114,11 +126,12 @@ public:
 		// Subscribe to MAVROS state for drone readiness
 		ros::NodeHandle global_nh, global_nh2;
 		mavros_state_sub_ = global_nh.subscribe("/mavros/state", 1, &PlatformIBVSNode::mavrosStateCallback, this);
+		tracking_status_sub_ = global_nh.subscribe("/platform_tracking_active", 1, &PlatformIBVSNode::trackingStatusCallback, this);
 		mavros_local_pos_sub_ = global_nh.subscribe("/mavros/local_position/pose", 10, &PlatformIBVSNode::localPositionCallback, this);
 		set_mode_client_ = global_nh.serviceClient<mavros_msgs::SetMode>("/mavros/set_mode", /* persistent= */ true);
 		arming_client_ = global_nh.serviceClient<mavros_msgs::CommandBool>("/mavros/cmd/arming", /* persistent= */ true);
 		mavros_setpoint_pub_ = global_nh2.advertise<geometry_msgs::Twist>("/mavros/setpoint_velocity/cmd_vel_unstamped", 10);
-
+		normal_error_pub_ = global_nh.advertise<std_msgs::Float32>("feature_error", 10);
 		// Fail fast if MAVROS is not running rather than silently dropping calls
 		ROS_INFO("PlatformIBVS: Waiting for MAVROS services...");
 		set_mode_client_.waitForExistence();
@@ -130,11 +143,23 @@ public:
 
 		// Setup control loop timer
 		control_timer_ = nh_.createTimer(ros::Duration(1.0 / control_frequency_), &PlatformIBVSNode::controlCallback, this);
-
 		ibvs_service_ = nh_.advertiseService("enable_ibvs", &PlatformIBVSNode::enableIBVSCallback, this);
 
 		ROS_INFO("PlatformIBVS: Node initialized. Auto-takeoff is enabled.");
 	}
+
+
+	void trackingStatusCallback(const std_msgs::Bool::ConstPtr& msg) {
+        if (msg->data != tracking_mode_) {
+            tracking_mode_ = msg->data;
+            if (tracking_mode_)
+                ROS_WARN("PlatformIBVS: Switched to TRACKER data (velocities scaled %.0f%%).",
+                         TRACKING_VELOCITY_SCALE * 100.0f);
+            else
+                ROS_INFO("PlatformIBVS: Platform re-detected. Back to direct control.");
+        }
+    }
+
 
 	bool enableIBVSCallback(std_srvs::SetBool::Request &req,
 							std_srvs::SetBool::Response &res)
@@ -463,8 +488,11 @@ public:
 
 		auto ctrl = ibvs_controller_->computeControlLaw(features, depth);
 
-		ROS_INFO_THROTTLE(1.0, "PlatformIBVS: err=%.4f  vx=%.3f vy=%.3f vz=%.3f ω=%.3f",
-				  ctrl.error_norm, ctrl.v_x, ctrl.v_y, ctrl.v_z, ctrl.omega_yaw);
+		// ROS_INFO_THROTTLE(1.0, "PlatformIBVS: err=%.4f  vx=%.3f vy=%.3f vz=%.3f ω=%.3f",
+				//   ctrl.error_norm, ctrl.v_x, ctrl.v_y, ctrl.v_z, ctrl.omega_yaw);
+		std_msgs::Float32 error_msg;
+		error_msg.data = ctrl.error_norm;
+		normal_error_pub_.publish(error_msg);
 
 		if (ctrl.error_norm < error_threshold_ && !tracking_)
 		{
@@ -493,6 +521,13 @@ public:
 	 */
 	void sendVelocityCommand(float v_x, float v_y, float v_z, float omega_yaw)
 	{
+		if (tracking_mode_) {
+            v_x      *= TRACKING_VELOCITY_SCALE;
+            v_y      *= TRACKING_VELOCITY_SCALE;
+            v_z      *= TRACKING_VELOCITY_SCALE;
+            omega_yaw*= TRACKING_VELOCITY_SCALE;
+        }
+
 		geometry_msgs::Twist vel_cmd;
 		vel_cmd.linear.x = -v_y;
 		vel_cmd.linear.y = -v_x;
@@ -504,7 +539,7 @@ public:
 		velocity_pub_.publish(vel_cmd);		   // local/downstream topic
 		mavros_setpoint_pub_.publish(vel_cmd); // directly into PX4 watchdog
 
-		ROS_DEBUG("PlatformIBVS: cmd vx=%.3f vy=%.3f vz=%.3f ω=%.3f", -v_y, -v_x, -v_z,
+		ROS_INFO_THROTTLE(1.0, COLOR_PURPLE "PlatformIBVS: cmd vx=%.3f vy=%.3f vz=%.3f ω=%.3f" COLOR_RESET, -v_y, -v_x, -v_z,
 				  -omega_yaw);
 	}
 
