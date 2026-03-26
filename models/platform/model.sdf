@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="aruco_platform">
+    <static>true</static>
+    <link name="platform_link">
+      <!-- marker is a thin box so texture appears on faces -->
+      <pose>0 0 0 0 0 0</pose>
+
+      <collision name="collision">
+        <geometry>
+          <box>
+            <!-- 0.2m x 0.2m square, thin thickness -->
+            <size>2.0 2.0 0.01</size>
+          </box>
+        </geometry>
+      </collision>
+
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>2.0 2.0 0.01</size>
+          </box>
+        </geometry>
+        <material>
+          <!-- script refers to the material script in this model -->
+          <script>
+            <uri>model://platform/materials/scripts</uri>
+            <uri>model://platform/materials/textures</uri>
+            <name>Platform</name>
+          </script>
+          <ambient>1 1 1 1</ambient>
+        </material>
+      </visual>
+    </link>
+    <!-- PLUGIN ATTACHMENT -->
+    <plugin name="moving_platform_plugin"
+            filename="libmoving_platform_plugin.so"/>
+  </model>
+</sdf>

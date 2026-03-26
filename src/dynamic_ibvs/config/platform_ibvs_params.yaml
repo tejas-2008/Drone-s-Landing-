@@ -1,6 +1,6 @@
 # ── Marker detection ──────────────────────────────────────────────────────────
 tracking_marker_id: 999   # ArUco marker ID on the landing platform
-marker_size: 0.725        # Physical side length of the marker [m]
+marker_size: 1.7        # Physical side length of the marker [m]
 
 # ── IBVS control law ──────────────────────────────────────────────────────────
 control_frequency: 50.0   # Main control loop rate [Hz]
@@ -15,5 +15,13 @@ takeoff_altitude: 3.5          # Target altitude before IBVS starts [m AGL]
 takeoff_climb_velocity: 0.5    # Climb rate during takeoff phase [m/s]
 
 # ── Adaptive gain (read by IBVSController if supported) ───────────────────────
-lambda_min: 0.5   # Minimum adaptive gain
-lambda_max: 1.25  # Maximum adaptive gain
+lambda_min: 0.25   # Minimum adaptive gain
+lambda_max: 1.0  # Maximum adaptive gain
+
+# ── Touchdown / landing ──────────────────────────────────────────────────
+descent_error_threshold: 0.50   # Feature error norm must stay below this to allow descent
+descent_velocity: 0.1           # Constant descent rate during landing [m/s]
+landing_altitude: 0.5           # Altitude at which to disarm [m AGL]
+descent_stabilization_time: 1.0 # Seconds error must stay stable before descent begins
+central_marker_id: 0            # ArUco marker ID on the central part of the platform
+central_marker_size: 0.25         # Physical size of the central marker [m] (for depth estimation)

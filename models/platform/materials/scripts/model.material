@@ -1,0 +1,14 @@
+material Platform
+{
+  technique
+  {
+    pass    
+    {
+      texture_unit
+      {
+        texture ../textures/platform.png
+        tex_address_mode wrap
+      }
+    }
+  }
+}
