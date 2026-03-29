@@ -10,6 +10,7 @@ add_compile_options(-std=c++14)
 find_package(catkin REQUIRED COMPONENTS
   roscpp
   std_msgs
+  geometry_msgs
   message_generation
 )
 
@@ -37,7 +38,7 @@ generate_messages(
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES moving_platform_plugin
-  CATKIN_DEPENDS roscpp std_msgs message_runtime
+  CATKIN_DEPENDS roscpp std_msgs geometry_msgs message_runtime
 )
 
 # --------------------------------------------------

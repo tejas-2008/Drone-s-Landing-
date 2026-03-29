@@ -16,7 +16,7 @@ IBVSController::IBVSController()
     : camera_initialized_(false), desired_area_(0), desired_centroid_x_(0),
       desired_centroid_y_(0), current_centroid_x_(0), current_centroid_y_(0),
       current_normalized_area_(0), error_norm_max_(1.0f),
-      first_computation_(false) {
+      first_computation_(false), kd_gain_(0.0f), has_prev_error_(false) {
   // Initialize matrices
   jacobian_ = -1.0 * arma::diagmat(arma::ones<arma::vec>(4));
   desired_features_image_ = arma::zeros<arma::mat>(4, 2);
@@ -25,14 +25,18 @@ IBVSController::IBVSController()
   centered_moments_current_ = arma::zeros<arma::mat>(4, 4);
   error_ = arma::zeros<arma::vec>(4);
   control_velocity_ = arma::zeros<arma::vec>(4);
+  prev_error_ = arma::zeros<arma::vec>(4);
+  error_derivative_ = arma::zeros<arma::vec>(4);
 }
 
-void IBVSController::setGainLimits(float lambda_min, float lambda_max) {
+void IBVSController::setGainLimits(float lambda_min, float lambda_max,
+                                   float kd_gain) {
   lambda_min_ = lambda_min;
   lambda_max_ = lambda_max;
-  ROS_INFO("IBVS: Gain limits set - lambda_min: %.2f, lambda_max: %.2f",
-           lambda_min_, lambda_max_);
-  return;
+  kd_gain_ = kd_gain;
+  ROS_INFO("IBVS: Gain limits set - lambda_min: %.2f, lambda_max: %.2f, "
+           "kd: %.3f",
+           lambda_min_, lambda_max_, kd_gain_);
 }
 
 void IBVSController::setActiveCamera(const CameraIntrinsics &intrinsics) {
@@ -146,8 +150,33 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
   // Compute pseudo-inverse of Jacobian
   jacobian_pinv_ = arma::pinv(jacobian_);
 
-  // Compute control velocity: v = -lambda * J^+ * e
-  control_velocity_ = -lambda * jacobian_pinv_ * error_;
+  // ── Derivative term (PD control) ──────────────────────────────────────
+  // Compute ė = d(error)/dt with low-pass filter to suppress noise.
+  // When the platform moves fast, ė is large → derivative term adds
+  // anticipatory velocity in the direction of motion.
+  arma::vec derivative_contribution = arma::zeros<arma::vec>(4);
+
+  if (kd_gain_ > EPSILON && has_prev_error_) {
+    float dt = (ros::Time::now() - prev_error_stamp_).toSec();
+    if (dt > 1e-4f && dt < 1.0f) { // Guard: skip if dt is bogus
+      arma::vec raw_derivative = (error_ - prev_error_) / dt;
+
+      // Exponential low-pass filter: ė_filtered = α·ė_raw + (1-α)·ė_prev
+      error_derivative_ = DERIV_FILTER_ALPHA * raw_derivative +
+                          (1.0f - DERIV_FILTER_ALPHA) * error_derivative_;
+
+      derivative_contribution = -kd_gain_ * jacobian_pinv_ * error_derivative_;
+    }
+  }
+
+  // Store current error for next iteration
+  prev_error_ = error_;
+  prev_error_stamp_ = ros::Time::now();
+  has_prev_error_ = true;
+
+  // Compute control velocity: v = -λ * J⁺ * e  -  kd * J⁺ * ė
+  control_velocity_ =
+      -lambda * jacobian_pinv_ * error_ + derivative_contribution;
 
   // Extract control outputs
   output.v_x = control_velocity_(0);
@@ -157,11 +186,10 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
 
   ROS_INFO_THROTTLE(
       1.0,
-      COLOR_YELLOW
-      "IBVS: Error norm: %.4f, Lambda: %.3f, Velocity: [%.3f, %.3f, "
-      "%.3f, %.3f]" COLOR_RESET,
-      output.error_norm, lambda, output.v_x, output.v_y, output.v_z,
-      output.omega_yaw);
+      COLOR_YELLOW "IBVS: err=%.4f λ=%.3f kd=%.3f ė_norm=%.3f vel=[%.3f, %.3f, "
+                   "%.3f, %.3f]" COLOR_RESET,
+      output.error_norm, lambda, kd_gain_, arma::norm(error_derivative_, 2),
+      output.v_x, output.v_y, output.v_z, output.omega_yaw);
 
   return output;
 }
@@ -267,5 +295,8 @@ void IBVSController::reset() {
   error_norm_max_ = 1.0f;
   error_.zeros();
   control_velocity_.zeros();
+  prev_error_.zeros();
+  error_derivative_.zeros();
+  has_prev_error_ = false;
   ROS_INFO("IBVS: Controller reset");
 }

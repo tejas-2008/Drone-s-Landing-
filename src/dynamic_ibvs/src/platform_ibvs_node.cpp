@@ -3,6 +3,7 @@
 #include <cmath>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Twist.h>
+#include <geometry_msgs/Vector3.h>
 #include <mavros_msgs/CommandBool.h>
 #include <mavros_msgs/SetMode.h>
 #include <mavros_msgs/State.h>
@@ -40,6 +41,9 @@ private:
   ros::Publisher velocity_pub_;
   ros::Publisher mavros_setpoint_pub_,
       normal_error_pub_; // publishes directly to MAVROS for startup watchdog
+  ros::Publisher diag_physical_error_pub_; // x_m, y_m, yaw_rad
+  ros::Publisher diag_pixel_error_pub_;    // x_px, y_px, 0
+  ros::Publisher diag_error_norms_pub_;    // norm_m, norm_px, norm_ibvs
   ros::Subscriber mavros_state_sub_;
   ros::Subscriber mavros_local_pos_sub_; // live altitude feedback
   ros::Subscriber tracking_status_sub_;
@@ -62,7 +66,7 @@ private:
   float takeoff_altitude_;       // target altitude for initial climb [m]
   float takeoff_climb_velocity_; // upward velocity during takeoff [m/s]
 
-  float lambda_min_, lambda_max_;
+  float lambda_min_, lambda_max_, kd_gain_;
 
   // State variables
   bool initialized_;
@@ -88,7 +92,7 @@ private:
 
   // IBVS service gate
   bool ibvs_enabled_; // true only after ~/enable_ibvs is called with data=true
-  static constexpr float TRACKING_VELOCITY_SCALE = 1.25f;
+  static constexpr float TRACKING_VELOCITY_SCALE = 1.00f;
 
   // ── Touchdown / descent ─────────────────────────────────────────────────
   float descent_error_threshold_; // max error norm to allow descent
@@ -97,8 +101,10 @@ private:
   float landing_altitude_;           // altitude to disarm [m AGL]
   float descent_stabilization_time_; // seconds error must stay below threshold
                                      // before descending
-  int central_marker_id_;     // ArUco marker ID to switch to during descent
-  float central_marker_size_; // physical size of the central marker [m]
+  int central_marker_id_;       // ArUco marker ID to switch to during descent
+  float central_marker_size_;   // physical size of the central marker [m]
+  float descent_lateral_scale_; // scale factor for lateral/yaw velocities
+                                // during descent
   bool descent_active_; // true once stabilisation passes — stays true until
                         // landing
   bool landed_; // true after disarm — prevents startup machine from re-arming
@@ -135,7 +141,8 @@ public:
     nh_.param("takeoff_climb_velocity", takeoff_climb_velocity_, 0.5f);
 
     nh_.param("lambda_min", lambda_min_, 0.25f);
-    nh_.param("lambda_max", lambda_max_, 2.5f);
+    nh_.param("lambda_max", lambda_max_, 1.0f);
+    nh_.param("kd_gain", kd_gain_, 0.15f);
 
     // Touchdown parameters
     nh_.param("descent_error_threshold", descent_error_threshold_, 0.50f);
@@ -144,6 +151,7 @@ public:
     nh_.param("descent_stabilization_time", descent_stabilization_time_, 2.0f);
     nh_.param("central_marker_id", central_marker_id_, 0);
     nh_.param("central_marker_size", central_marker_size_, 0.5f);
+    nh_.param("descent_lateral_scale", descent_lateral_scale_, 0.3f);
 
     ROS_INFO("PlatformIBVS: Loaded parameters - marker_id: %d, marker_size: "
              "%.3f m, freq: %.1f Hz",
@@ -159,7 +167,7 @@ public:
     marker_detector_ = std::make_unique<MarkerDetector>(&nh_);
     ibvs_controller_ = std::make_unique<IBVSController>();
 
-    ibvs_controller_->setGainLimits(lambda_min_, lambda_max_);
+    ibvs_controller_->setGainLimits(lambda_min_, lambda_max_, kd_gain_);
 
     // Subscribe to MAVROS state for drone readiness
     ros::NodeHandle global_nh, global_nh2;
@@ -187,6 +195,14 @@ public:
 
     // Setup velocity publisher
     velocity_pub_ = nh_.advertise<geometry_msgs::Twist>("cmd_vel", 10);
+
+    // Diagnostics publishers
+    diag_physical_error_pub_ =
+        nh_.advertise<geometry_msgs::Vector3>("diagnostics/physical_error", 10);
+    diag_pixel_error_pub_ =
+        nh_.advertise<geometry_msgs::Vector3>("diagnostics/pixel_error", 10);
+    diag_error_norms_pub_ =
+        nh_.advertise<geometry_msgs::Vector3>("diagnostics/error_norms", 10);
 
     // Setup control loop timer
     control_timer_ = nh_.createTimer(ros::Duration(1.0 / control_frequency_),
@@ -524,12 +540,15 @@ public:
     error_msg.data = ctrl.error_norm;
     normal_error_pub_.publish(error_msg);
 
+    // ── Diagnostics: physical, pixel, and norm errors ─────────────────────
+    publishDiagnostics(depth);
+
     if (ctrl.error_norm < error_threshold_ && !tracking_) {
       tracking_ = true;
       ROS_INFO("{PlatformIBVS}: Marker acquired. Tracking initiated.");
     }
 
-    // ── Touchdown logic ──────────────────────────────────────────────────
+    // ─────────────────────── Touchdown logic ─────────────────────────────
     updateDescentState(ctrl.error_norm);
 
     float cmd_vz = saturateVelocity(ctrl.v_z, max_linear_velocity_);
@@ -556,12 +575,21 @@ public:
             ctrl.error_norm, descent_error_threshold_);
       }
     }
-    // ────────────────────────────────────────────────────────────────────
 
-    sendVelocityCommand(
-        saturateVelocity(ctrl.v_x, max_linear_velocity_),
-        saturateVelocity(ctrl.v_y, max_linear_velocity_), cmd_vz,
-        saturateVelocity(ctrl.omega_yaw, max_angular_velocity_));
+    // Compute final velocity commands
+    float cmd_vx = saturateVelocity(ctrl.v_x, max_linear_velocity_);
+    float cmd_vy = saturateVelocity(ctrl.v_y, max_linear_velocity_);
+    float cmd_omega = saturateVelocity(ctrl.omega_yaw, max_angular_velocity_);
+
+    // During descent, scale down lateral/yaw corrections to prevent
+    // oscillation caused by marker proximity (large pixel shifts → jitter)
+    if (descent_active_) {
+      cmd_vx *= descent_lateral_scale_;
+      cmd_vy *= descent_lateral_scale_;
+      cmd_omega *= descent_lateral_scale_;
+    }
+
+    sendVelocityCommand(cmd_vx, cmd_vy, cmd_vz, cmd_omega);
   }
 
   /**
@@ -777,6 +805,60 @@ private:
     ROS_INFO("PlatformIBVS: Controller initialized with desired features "
              "centered at (%.0f, %.0f)",
              cx, cy);
+  }
+
+  /**
+   * @brief Publish diagnostic error information for monitoring convergence.
+   *
+   * Publishes three Vector3 messages:
+   *   - physical_error: (x_meters, y_meters, yaw_radians)
+   *   - pixel_error:    (x_pixels, y_pixels, 0)
+   *   - error_norms:    (norm_meters, norm_pixels, norm_ibvs_raw)
+   */
+  void publishDiagnostics(float depth) {
+    if (!initialized_ || !marker_detector_->hasCameraInfo())
+      return;
+
+    // Centroid offset in normalised image coordinates
+    float cx_err = ibvs_controller_->getCurrentCentroidX() -
+                   ibvs_controller_->getDesiredCentroidX();
+    float cy_err = ibvs_controller_->getCurrentCentroidY() -
+                   ibvs_controller_->getDesiredCentroidY();
+
+    // Yaw error from the IBVS error vector (element 3)
+    arma::vec e = ibvs_controller_->getCurrentError();
+    float yaw_err = (e.n_elem >= 4) ? (float)e(3) : 0.0f;
+
+    // 1. Physical error (metres)
+    float phys_x = depth * cx_err;
+    float phys_y = depth * cy_err;
+
+    geometry_msgs::Vector3 phys_msg;
+    phys_msg.x = phys_x;
+    phys_msg.y = phys_y;
+    phys_msg.z = yaw_err;
+    diag_physical_error_pub_.publish(phys_msg);
+
+    // 2. Pixel error
+    float px_x = cx_err * marker_detector_->getCameraFx();
+    float px_y = cy_err * marker_detector_->getCameraFy();
+
+    geometry_msgs::Vector3 px_msg;
+    px_msg.x = px_x;
+    px_msg.y = px_y;
+    px_msg.z = 0.0;
+    diag_pixel_error_pub_.publish(px_msg);
+
+    // 3. Norms
+    float norm_m = std::sqrt(phys_x * phys_x + phys_y * phys_y);
+    float norm_px = std::sqrt(px_x * px_x + px_y * px_y);
+    float norm_ibvs = (float)arma::norm(e, 2);
+
+    geometry_msgs::Vector3 norm_msg;
+    norm_msg.x = norm_m;
+    norm_msg.y = norm_px;
+    norm_msg.z = norm_ibvs;
+    diag_error_norms_pub_.publish(norm_msg);
   }
 
   /**

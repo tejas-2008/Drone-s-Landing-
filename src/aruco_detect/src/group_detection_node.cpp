@@ -261,10 +261,7 @@ private:
 
     publishTrackingStatus(true);
     ROS_WARN_THROTTLE(
-        0.5,
-        COLOR_YELLOW
-        "Platform tracking active — %.2fs since last detection" COLOR_RESET,
-        elapsed);
+        0.5, "Platform tracking active — %.2fs since last detection", elapsed);
   }
 
   void publishTrackingStatus(bool is_tracking) {
@@ -291,7 +288,7 @@ public:
     // platform_half_size defines the outer reach of the marker layout [m].
     // From marker_groups.yaml: corner markers at ±0.6 m, half-size 0.125 m
     // → outer edge = 0.6 + 0.125 = 0.725 m from centre.
-    pnh_.param<float>("platform_half_size", platform_half_size_, 0.725f);
+    pnh_.param<float>("platform_half_size", platform_half_size_, 0.85f);
 
     // 3D corners of the platform bounding box in the board frame (Z=0 plane).
     // These are projected back to image space when estimatePoseBoard fails.
@@ -444,8 +441,6 @@ public:
         fiducial_msgs::FiducialTransformArray fiducial_transforms;
         fiducial_transforms.header = rgb_msg->header;
 
-
-
         for (size_t i = 0; i < ids.size(); i++) {
           bool is_in_board = false;
           if (board_) {
@@ -471,8 +466,6 @@ public:
             fiducial.y3 = corners[i][3].y;
           }
           vertices_msg.fiducials.push_back(fiducial);
-
-
 
           // Individual marker transform
           float msize = 0.05f;
@@ -573,8 +566,8 @@ public:
           // These may lie outside the image when the platform is near
           // the frame edge — that is intentional.
           std::vector<cv::Point2f> projected_corners;
-          cv::projectPoints(platform_corners_3d_, rvec, tvec,
-                            camera_matrix_, dist_coeffs_, projected_corners);
+          cv::projectPoints(platform_corners_3d_, rvec, tvec, camera_matrix_,
+                            dist_coeffs_, projected_corners);
 
           fiducial_msgs::Fiducial platform_fid;
           platform_fid.fiducial_id = 999;

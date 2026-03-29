@@ -2,24 +2,16 @@
 #define MOVING_PLATFORM_PLUGIN_HPP
 
 // Gazebo
+#include <gazebo/common/common.hh>
 #include <gazebo/gazebo.hh>
 #include <gazebo/physics/physics.hh>
-#include <gazebo/common/common.hh>
-
-// ROS
+#include <memory>
+#include <platform_control/SetPlatformVelocity.h>
 #include <ros/ros.h>
 
-// STL
-#include <memory>
+namespace gazebo {
 
-// Custom service
-#include <platform_control/SetPlatformVelocity.h>
-
-namespace gazebo
-{
-
-class MovingPlatformPlugin : public ModelPlugin
-{
+class MovingPlatformPlugin : public ModelPlugin {
 public:
   MovingPlatformPlugin() = default;
   virtual ~MovingPlatformPlugin() = default;
@@ -29,10 +21,8 @@ public:
 private:
   void OnUpdate();
 
-  bool SetVelocityCb(
-    platform_control::SetPlatformVelocity::Request &req,
-    platform_control::SetPlatformVelocity::Response &res
-  );
+  bool SetVelocityCb(platform_control::SetPlatformVelocity::Request &req,
+                     platform_control::SetPlatformVelocity::Response &res);
 
 private:
   physics::ModelPtr model_;
@@ -47,6 +37,6 @@ private:
   double yaw_rate_{0.0};
 };
 
-}  // namespace gazebo
+} // namespace gazebo
 
 #endif

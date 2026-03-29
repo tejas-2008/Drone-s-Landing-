@@ -6,7 +6,7 @@ marker_size: 1.7        # Physical side length of the marker [m]
 control_frequency: 50.0   # Main control loop rate [Hz]
 error_threshold: 0.1     # Feature error norm to declare "acquired"
 max_linear_velocity: 1.5  # Velocity saturation limit per axis [m/s]
-max_angular_velocity: 1.0 # Yaw rate saturation limit [rad/s]
+max_angular_velocity: 0.5 # Yaw rate saturation limit [rad/s]
 desired_depth: 2.5        # Desired camera-to-marker distance [m]
 
 # ── Flight setup ──────────────────────────────────────────────────────────────
@@ -15,13 +15,15 @@ takeoff_altitude: 3.5          # Target altitude before IBVS starts [m AGL]
 takeoff_climb_velocity: 0.5    # Climb rate during takeoff phase [m/s]
 
 # ── Adaptive gain (read by IBVSController if supported) ───────────────────────
-lambda_min: 0.25   # Minimum adaptive gain
-lambda_max: 1.0  # Maximum adaptive gain
+lambda_min: 0.25   # Gain when far (conservative — avoids overshoot on approach)
+lambda_max: 0.75    # Gain when close (moderate — prevents oscillation at convergence)
+kd_gain: 0.1       # Derivative gain (reduced to avoid amplifying detection noise)
 
 # ── Touchdown / landing ──────────────────────────────────────────────────
-descent_error_threshold: 0.50   # Feature error norm must stay below this to allow descent
+descent_error_threshold: 0.10   # Feature error norm must stay below this to allow descent
 descent_velocity: 0.1           # Constant descent rate during landing [m/s]
 landing_altitude: 0.5           # Altitude at which to disarm [m AGL]
-descent_stabilization_time: 1.0 # Seconds error must stay stable before descent begins
+descent_stabilization_time: 5.0 # Seconds error must stay stable before descent begins
 central_marker_id: 0            # ArUco marker ID on the central part of the platform
 central_marker_size: 0.25         # Physical size of the central marker [m] (for depth estimation)
+descent_lateral_scale: 0.3       # Scale factor for lateral/yaw corrections during descent (1.0=full, 0.3=gentle)

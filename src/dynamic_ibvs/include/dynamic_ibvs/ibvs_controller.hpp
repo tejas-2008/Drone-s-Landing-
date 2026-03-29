@@ -3,6 +3,7 @@
 
 #include <armadillo>
 #include <memory>
+#include <ros/ros.h>
 #include <vector>
 
 /**
@@ -59,7 +60,7 @@ public:
    */
   void setActiveCamera(const CameraIntrinsics &intrinsics);
 
-  void setGainLimits(float lambda_min, float lambda_max);
+  void setGainLimits(float lambda_min, float lambda_max, float kd_gain = 0.0f);
 
   /**
    * @brief Set desired visual feature positions
@@ -88,6 +89,12 @@ public:
    * @return 4-element error vector [x_err, y_err, area_err, orientation_err]
    */
   arma::vec getCurrentError() const { return error_; }
+
+  // ── Diagnostics getters ────────────────────────────────────────────────
+  float getCurrentCentroidX() const { return current_centroid_x_; }
+  float getCurrentCentroidY() const { return current_centroid_y_; }
+  float getDesiredCentroidX() const { return desired_centroid_x_; }
+  float getDesiredCentroidY() const { return desired_centroid_y_; }
 
   /**
    * @brief Reset controller state
@@ -127,6 +134,14 @@ private:
   // Control parameters
   float error_norm_max_;   ///< Initial error norm for gain adaptation
   bool first_computation_; ///< First computation flag for error normalization
+
+  // Derivative (D) term for PD control
+  float kd_gain_;                    ///< Derivative gain (0 = pure P, >0 = PD)
+  arma::vec prev_error_;             ///< Previous error vector for ė computation
+  arma::vec error_derivative_;       ///< Filtered error derivative (low-pass)
+  ros::Time prev_error_stamp_;       ///< Timestamp of previous error
+  bool has_prev_error_;              ///< True after first computeControlLaw call
+  static constexpr float DERIV_FILTER_ALPHA = 0.15f; ///< Low-pass filter coefficient for ė
 
   /**
    * @brief Compute centered moments for given feature points
