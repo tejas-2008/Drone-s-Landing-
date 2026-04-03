@@ -89,6 +89,11 @@ void IBVSController::setDesiredFeatures(const VisualFeatures &desired_features,
 
   ROS_INFO("IBVS: Desired features set - centroid: (%.3f, %.3f), area: %.3f",
            desired_centroid_x_, desired_centroid_y_, desired_area_);
+
+  // FIX 1: Reset controller state on new desired features (e.g. ID 999->0
+  // handoff). Without this, the derivative term fires immediately with a
+  // stale prev_error_ from the old marker, amplifying the transition spike.
+  reset();
 }
 
 IBVSController::ControlOutput
@@ -151,14 +156,11 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
   jacobian_pinv_ = arma::pinv(jacobian_);
 
   // ── Derivative term (PD control) ──────────────────────────────────────
-  // Compute ė = d(error)/dt with low-pass filter to suppress noise.
-  // When the platform moves fast, ė is large → derivative term adds
-  // anticipatory velocity in the direction of motion.
   arma::vec derivative_contribution = arma::zeros<arma::vec>(4);
 
   if (kd_gain_ > EPSILON && has_prev_error_) {
     float dt = (ros::Time::now() - prev_error_stamp_).toSec();
-    if (dt > 1e-4f && dt < 1.0f) { // Guard: skip if dt is bogus
+    if (dt > 1e-4f && dt < 1.0f) {
       arma::vec raw_derivative = (error_ - prev_error_) / dt;
 
       // Exponential low-pass filter: ė_filtered = α·ė_raw + (1-α)·ė_prev
@@ -244,48 +246,67 @@ void IBVSController::computeJacobian(float current_area, float desired_area,
   float area_normalized =
       depth * std::sqrt(desired_area / std::max(current_area, EPSILON));
 
-  // Jacobian entries for rotation
-  jacobian_(0, 3) = current_centroid_y;  // x error vs rotation
-  jacobian_(1, 3) = -current_centroid_x; // y error vs rotation
+  // Jacobian entries for rotation (yaw coupling into x/y centroid error)
+  jacobian_(0, 3) = current_centroid_y;  // x error vs yaw
+  jacobian_(1, 3) = -current_centroid_x; // y error vs yaw
 
-  // For combined moments
-  float area_avg = (current_area + desired_area) / (2.0f * NUM_FEATURES);
-  jacobian_(2, 3) = area_normalized * current_centroid_x;
-  jacobian_(3, 3) = -area_normalized * current_centroid_x;
+  // FIX 2: area_avg was computed but never used; Jacobian(3,3) was a copy of
+  // Jacobian(2,3) with wrong sign. Row 2 = area error (depth control),
+  // Row 3 = orientation error (yaw control). They should be independent.
+  // area_normalized scales the area row; orientation row stays -1 (identity).
+  jacobian_(2, 2) = -area_normalized; // area error drives Z velocity
+  // jacobian_(3,3) already set to -1 by diagmat init — correct for yaw
 }
 
 void IBVSController::computeError(const arma::mat &current_features,
                                   float depth) {
   error_.zeros();
 
-  // Centroid error
+  // Centroid error (scaled by normalized area to be depth-invariant)
   error_(0) = current_normalized_area_ * current_centroid_x_ -
               (depth * desired_centroid_x_);
   error_(1) = current_normalized_area_ * current_centroid_y_ -
               (depth * desired_centroid_y_);
 
-  // Area error
+  // FIX 3: Area error should be dimensionless ratio, not depth-dependent.
+  // Old: error_(2) = current_normalized_area_ - depth
+  //   → only zero when depth==0, never converges correctly.
+  // New: error_(2) = sqrt(Ad/Ac) - 1
+  //   → zero exactly when current area == desired area, independent of depth.
   float current_area =
       arma::accu(centered_moments_current_(arma::span(2, 2), arma::span(0, 2)));
-  error_(2) = current_normalized_area_ - depth;
+  float area_ratio = std::sqrt(desired_area_ / std::max(current_area, EPSILON));
+  error_(2) = area_ratio - 1.0f;
 
-  // Orientation error (using second-order moments)
+  // FIX 4: Orientation error — standard formula uses the cross-moment u11,
+  // not u20 in the atan2 numerator. Old code used u20 twice, giving a
+  // wrong angle that introduced systematic yaw error and caused x/y
+  // oscillations via Jacobian cross-coupling.
+  //
+  // Correct formula: α = 0.5 * atan2(2*μ₁₁, μ₂₀ - μ₀₂)
+  float u11 = centered_moments_current_(1, 1) / NUM_FEATURES; // cross-moment
   float u20 = centered_moments_current_(2, 0) / NUM_FEATURES;
   float u02 = centered_moments_current_(0, 2) / NUM_FEATURES;
+
+  float u11_d = centered_moments_desired_(1, 1) / NUM_FEATURES;
   float u20_d = centered_moments_desired_(2, 0) / NUM_FEATURES;
   float u02_d = centered_moments_desired_(0, 2) / NUM_FEATURES;
 
-  float alpha = 0.5f * std::atan2(2.0f * u20, u02 - u20);
-  float alpha_d = 0.5f * std::atan2(2.0f * u20_d, u02_d - u20_d);
+  float alpha   = 0.5f * std::atan2(2.0f * u11,   u20   - u02);
+  float alpha_d = 0.5f * std::atan2(2.0f * u11_d, u20_d - u02_d);
 
   error_(3) = alpha - alpha_d;
 }
 
 float IBVSController::computeAdaptiveGain(float current_error_norm) {
-
+  // FIX 5: Gain was inverted — λ_max was given when error≈0, λ_min when
+  // error was large. This is the opposite of desired behaviour (you want
+  // aggressive correction when far away, gentle when close).
+  // Corrected: λ = λ_min + (λ_max - λ_min) * error_ratio
+  //   → λ_max when error is large, λ_min when error≈0.
   float error_ratio =
       std::min(current_error_norm / std::max(error_norm_max_, EPSILON), 1.0f);
-  float lambda = lambda_max_ - (lambda_max_ - lambda_min_) * error_ratio;
+  float lambda = lambda_min_ + (lambda_max_ - lambda_min_) * error_ratio;
 
   return lambda;
 }
