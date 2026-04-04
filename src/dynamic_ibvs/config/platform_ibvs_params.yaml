@@ -5,8 +5,8 @@ marker_size: 1.7        # Physical side length of the marker [m]
 # ── IBVS control law ──────────────────────────────────────────────────────────
 control_frequency: 50.0   # Main control loop rate [Hz]
 error_threshold: 0.1     # Feature error norm to declare "acquired"
-max_linear_velocity: 1.5  # Velocity saturation limit per axis [m/s]
-max_angular_velocity: 0.5 # Yaw rate saturation limit [rad/s]
+max_linear_velocity: 0.3  # Velocity saturation limit per axis [m/s]
+max_angular_velocity: 0.3 # Yaw rate saturation limit [rad/s]
 desired_depth: 2.5        # Desired camera-to-marker distance [m]
 
 # ── Flight setup ──────────────────────────────────────────────────────────────
@@ -17,7 +17,9 @@ takeoff_climb_velocity: 0.5    # Climb rate during takeoff phase [m/s]
 # ── Adaptive gain (read by IBVSController if supported) ───────────────────────
 lambda_min: 0.25   # Gain when far (conservative — avoids overshoot on approach)
 lambda_max: 0.75    # Gain when close (moderate — prevents oscillation at convergence)
-kd_gain: 0.1       # Derivative gain (reduced to avoid amplifying detection noise)
+kd_gain: 0.12       # Derivative gain (reduced to avoid amplifying detection noise)
+ki_gain: 0.05      # Integral gain (drives steady-state offset to zero)
+integral_windup_limit: 0.5  # L2 norm cap on integral accumulator
 
 # ── Touchdown / landing ──────────────────────────────────────────────────
 descent_error_threshold: 0.10   # Feature error norm must stay below this to allow descent

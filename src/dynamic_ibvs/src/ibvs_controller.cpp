@@ -16,7 +16,8 @@ IBVSController::IBVSController()
     : camera_initialized_(false), desired_area_(0), desired_centroid_x_(0),
       desired_centroid_y_(0), current_centroid_x_(0), current_centroid_y_(0),
       current_normalized_area_(0), error_norm_max_(1.0f),
-      first_computation_(false), kd_gain_(0.0f), has_prev_error_(false) {
+      first_computation_(false), kd_gain_(0.0f), has_prev_error_(false),
+      ki_gain_(0.0f), integral_windup_limit_(0.5f) {
   // Initialize matrices
   jacobian_ = -1.0 * arma::diagmat(arma::ones<arma::vec>(4));
   desired_features_image_ = arma::zeros<arma::mat>(4, 2);
@@ -27,16 +28,19 @@ IBVSController::IBVSController()
   control_velocity_ = arma::zeros<arma::vec>(4);
   prev_error_ = arma::zeros<arma::vec>(4);
   error_derivative_ = arma::zeros<arma::vec>(4);
+  error_integral_ = arma::zeros<arma::vec>(4);
 }
 
 void IBVSController::setGainLimits(float lambda_min, float lambda_max,
-                                   float kd_gain) {
+                                   float kd_gain, float ki_gain,
+                                   float integral_windup_limit) {
   lambda_min_ = lambda_min;
   lambda_max_ = lambda_max;
   kd_gain_ = kd_gain;
-  ROS_INFO("IBVS: Gain limits set - lambda_min: %.2f, lambda_max: %.2f, "
-           "kd: %.3f",
-           lambda_min_, lambda_max_, kd_gain_);
+  ki_gain_ = ki_gain;
+  integral_windup_limit_ = integral_windup_limit;
+  ROS_INFO("IBVS: Gains set - lambda:[%.2f,%.2f] kd:%.3f ki:%.3f windup:%.2f",
+           lambda_min_, lambda_max_, kd_gain_, ki_gain_, integral_windup_limit_);
 }
 
 void IBVSController::setActiveCamera(const CameraIntrinsics &intrinsics) {
@@ -150,15 +154,15 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
   // Compute pseudo-inverse of Jacobian
   jacobian_pinv_ = arma::pinv(jacobian_);
 
-  // ── Derivative term (PD control) ──────────────────────────────────────
-  // Compute ė = d(error)/dt with low-pass filter to suppress noise.
-  // When the platform moves fast, ė is large → derivative term adds
-  // anticipatory velocity in the direction of motion.
+  // ── Derivative term (D) ───────────────────────────────────────────────
   arma::vec derivative_contribution = arma::zeros<arma::vec>(4);
 
+  ros::Time now = ros::Time::now();
+  float dt = 0.0f;
+
   if (kd_gain_ > EPSILON && has_prev_error_) {
-    float dt = (ros::Time::now() - prev_error_stamp_).toSec();
-    if (dt > 1e-4f && dt < 1.0f) { // Guard: skip if dt is bogus
+    dt = (now - prev_error_stamp_).toSec();
+    if (dt > 1e-4f && dt < 1.0f) {
       arma::vec raw_derivative = (error_ - prev_error_) / dt;
 
       // Exponential low-pass filter: ė_filtered = α·ė_raw + (1-α)·ė_prev
@@ -169,14 +173,37 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
     }
   }
 
+  // ── Integral term (I) ─────────────────────────────────────────────────
+  // Accumulate error over time. The integral drives residual steady-state
+  // offsets to zero (e.g., constant-velocity platform lag).
+  arma::vec integral_contribution = arma::zeros<arma::vec>(4);
+
+  if (ki_gain_ > EPSILON && has_prev_error_) {
+    if (dt < EPSILON) {
+      dt = (now - prev_error_stamp_).toSec();
+    }
+    if (dt > 1e-4f && dt < 1.0f) {
+      // Trapezoidal integration: ∫e ≈ ∫e_prev + (e_prev + e) / 2 · dt
+      error_integral_ += 0.5f * (prev_error_ + error_) * dt;
+
+      // Anti-windup: clamp the L2 norm of the integral accumulator.
+      float integral_norm = arma::norm(error_integral_, 2);
+      if (integral_norm > integral_windup_limit_) {
+        error_integral_ *= (integral_windup_limit_ / integral_norm);
+      }
+
+      integral_contribution = -ki_gain_ * jacobian_pinv_ * error_integral_;
+    }
+  }
+
   // Store current error for next iteration
   prev_error_ = error_;
-  prev_error_stamp_ = ros::Time::now();
+  prev_error_stamp_ = now;
   has_prev_error_ = true;
 
-  // Compute control velocity: v = -λ * J⁺ * e  -  kd * J⁺ * ė
+  // Compute control velocity: v = -λ·J⁺·e  -  kd·J⁺·ė  -  ki·J⁺·∫e
   control_velocity_ =
-      -lambda * jacobian_pinv_ * error_ + derivative_contribution;
+      -lambda * jacobian_pinv_ * error_ + derivative_contribution + integral_contribution;
 
   // Extract control outputs
   output.v_x = control_velocity_(0);
@@ -186,9 +213,10 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
 
   ROS_INFO_THROTTLE(
       1.0,
-      COLOR_YELLOW "IBVS: err=%.4f λ=%.3f kd=%.3f ė_norm=%.3f vel=[%.3f, %.3f, "
+      COLOR_YELLOW "IBVS: err=%.4f λ=%.3f kd=%.3f ki=%.3f ∫norm=%.3f vel=[%.3f, %.3f, "
                    "%.3f, %.3f]" COLOR_RESET,
-      output.error_norm, lambda, kd_gain_, arma::norm(error_derivative_, 2),
+      output.error_norm, lambda, kd_gain_, ki_gain_,
+      arma::norm(error_integral_, 2),
       output.v_x, output.v_y, output.v_z, output.omega_yaw);
 
   return output;
@@ -297,6 +325,7 @@ void IBVSController::reset() {
   control_velocity_.zeros();
   prev_error_.zeros();
   error_derivative_.zeros();
+  error_integral_.zeros();
   has_prev_error_ = false;
-  ROS_INFO("IBVS: Controller reset");
+  ROS_INFO("IBVS: Controller reset (P/I/D state cleared)");
 }

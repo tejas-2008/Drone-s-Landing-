@@ -60,7 +60,8 @@ public:
    */
   void setActiveCamera(const CameraIntrinsics &intrinsics);
 
-  void setGainLimits(float lambda_min, float lambda_max, float kd_gain = 0.0f);
+  void setGainLimits(float lambda_min, float lambda_max, float kd_gain = 0.0f,
+                     float ki_gain = 0.0f, float integral_windup_limit = 0.5f);
 
   /**
    * @brief Set desired visual feature positions
@@ -135,13 +136,18 @@ private:
   float error_norm_max_;   ///< Initial error norm for gain adaptation
   bool first_computation_; ///< First computation flag for error normalization
 
-  // Derivative (D) term for PD control
+  // Derivative (D) term
   float kd_gain_;                    ///< Derivative gain (0 = pure P, >0 = PD)
   arma::vec prev_error_;             ///< Previous error vector for ė computation
   arma::vec error_derivative_;       ///< Filtered error derivative (low-pass)
   ros::Time prev_error_stamp_;       ///< Timestamp of previous error
   bool has_prev_error_;              ///< True after first computeControlLaw call
   static constexpr float DERIV_FILTER_ALPHA = 0.15f; ///< Low-pass filter coefficient for ė
+
+  // Integral (I) term
+  float ki_gain_;                    ///< Integral gain (0 = no integral action)
+  float integral_windup_limit_;      ///< L2 norm cap on integral accumulator
+  arma::vec error_integral_;         ///< Accumulated error integral
 
   /**
    * @brief Compute centered moments for given feature points

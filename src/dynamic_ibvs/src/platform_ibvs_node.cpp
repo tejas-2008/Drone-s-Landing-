@@ -66,7 +66,7 @@ private:
   float takeoff_altitude_;       // target altitude for initial climb [m]
   float takeoff_climb_velocity_; // upward velocity during takeoff [m/s]
 
-  float lambda_min_, lambda_max_, kd_gain_;
+  float lambda_min_, lambda_max_, kd_gain_, ki_gain_, integral_windup_limit_;
 
   // State variables
   bool initialized_;
@@ -107,6 +107,7 @@ private:
                                 // during descent
   bool descent_active_; // true once stabilisation passes — stays true until
                         // landing
+  bool prev_descent_active_; // tracks previous value to detect transition
   bool landed_; // true after disarm — prevents startup machine from re-arming
   bool error_below_threshold_timing_; // true while counting stabilisation
                                       // seconds
@@ -125,7 +126,7 @@ public:
         local_pos_received_(false),
         startup_state_(StartupState::WAITING_FOR_FCU),
         setpoint_stream_start_(ros::Time(0)), ibvs_enabled_(false),
-        descent_active_(false), landed_(false),
+        descent_active_(false), prev_descent_active_(false), landed_(false),
         error_below_threshold_timing_(false) {
 
     // Load parameters
@@ -143,6 +144,8 @@ public:
     nh_.param("lambda_min", lambda_min_, 0.25f);
     nh_.param("lambda_max", lambda_max_, 1.0f);
     nh_.param("kd_gain", kd_gain_, 0.15f);
+    nh_.param("ki_gain", ki_gain_, 0.15f);
+    nh_.param("integral_windup_limit", integral_windup_limit_, 0.5f);
 
     // Touchdown parameters
     nh_.param("descent_error_threshold", descent_error_threshold_, 0.50f);
@@ -167,7 +170,8 @@ public:
     marker_detector_ = std::make_unique<MarkerDetector>(&nh_);
     ibvs_controller_ = std::make_unique<IBVSController>();
 
-    ibvs_controller_->setGainLimits(lambda_min_, lambda_max_, kd_gain_);
+    ibvs_controller_->setGainLimits(lambda_min_, lambda_max_, kd_gain_,
+                                    ki_gain_, integral_windup_limit_);
 
     // Subscribe to MAVROS state for drone readiness
     ros::NodeHandle global_nh, global_nh2;
@@ -497,6 +501,25 @@ public:
       return;
     }
 
+    // ── Detect descent transition and re-initialize for the central marker ──
+    //
+    // When descent_active_ flips true, the tracked marker switches from
+    // ID 999 (large bounding box, marker_size ~ 1.7m) to ID 0 (small
+    // central marker, central_marker_size ~ 0.25m).
+    //
+    // Without re-initialization, desired_area_ remains sized for the 80px
+    // approach window. The area of ID 0 is ~10× smaller at the same depth,
+    // causing current_normalized_area_ to spike ~3× and all 4 error
+    // components to blow up instantly.
+    //
+    // Fix: call reinitializeForDescentMarker() which computes desired
+    // features sized to the central marker at desired_depth using actual
+    // camera intrinsics, then resets PID state.
+    if (descent_active_ && !prev_descent_active_) {
+      reinitializeForDescentMarker();
+    }
+    prev_descent_active_ = descent_active_;
+
     // During descent, switch to the central marker for more reliable tracking
     // as corner markers leave the camera FOV.
     int active_marker_id =
@@ -805,6 +828,41 @@ private:
     ROS_INFO("PlatformIBVS: Controller initialized with desired features "
              "centered at (%.0f, %.0f)",
              cx, cy);
+  }
+
+  /**
+   * @brief Re-initialize desired features for the central descent marker.
+   *
+   * Computes a desired feature window sized to the central marker's physical
+   * dimensions projected at desired_depth_, using actual camera intrinsics.
+   * Then resets PID state (integral, derivative, error_norm_max) so the
+   * approach-phase history doesn't contaminate the landing phase.
+   */
+  void reinitializeForDescentMarker() {
+    float fx = marker_detector_->getCameraFx();
+    float fy = marker_detector_->getCameraFy();
+    float u0 = marker_detector_->getCameraU0();
+    float v0 = marker_detector_->getCameraV0();
+
+    // Half the marker's physical extent projected at desired_depth_
+    float half_x = (central_marker_size_ / 2.0f) / desired_depth_ * fx;
+    float half_y = (central_marker_size_ / 2.0f) / desired_depth_ * fy;
+
+    IBVSController::VisualFeatures desired;
+    desired.x = {u0 - half_x, u0 + half_x, u0 + half_x, u0 - half_x};
+    desired.y = {v0 - half_y, v0 - half_y, v0 + half_y, v0 + half_y};
+
+    ibvs_controller_->setDesiredFeatures(desired, desired_depth_);
+
+    // Reset clears: integral wind-up, derivative filter, error_norm_max.
+    ibvs_controller_->reset();
+
+    ROS_INFO(COLOR_GREEN
+        "PlatformIBVS: Descent re-init — central marker ID %d (%.3f m) | "
+        "desired window: %.1f×%.1f px at %.2f m depth"
+        COLOR_RESET,
+        central_marker_id_, central_marker_size_,
+        2.0f * half_x, 2.0f * half_y, desired_depth_);
   }
 
   /**
