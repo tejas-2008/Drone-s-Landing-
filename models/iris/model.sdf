@@ -31,12 +31,15 @@
             <ode>
               <max_vel>100.0</max_vel>
               <min_depth>0.001</min_depth>
+              <kp>1e6</kp>
+              <kd>100</kd>
             </ode>
           </contact>
           <friction>
             <ode>
-              <mu>1.0</mu>
-              <mu2>1.0</mu2>
+              <mu>50.0</mu>
+              <mu2>50.0</mu2>
+              <fdir1>0 0 0</fdir1>
             </ode>
           </friction>
         </surface>

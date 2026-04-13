@@ -67,6 +67,8 @@ private:
   float takeoff_climb_velocity_; // upward velocity during takeoff [m/s]
 
   float lambda_min_, lambda_max_, kd_gain_, ki_gain_, integral_windup_limit_;
+  float gain_full_altitude_;  // depth above which gains are 100%
+  float gain_min_scale_;      // floor for gain attenuation
 
   // State variables
   bool initialized_;
@@ -146,6 +148,8 @@ public:
     nh_.param("kd_gain", kd_gain_, 0.15f);
     nh_.param("ki_gain", ki_gain_, 0.15f);
     nh_.param("integral_windup_limit", integral_windup_limit_, 0.5f);
+    nh_.param("gain_full_altitude",     gain_full_altitude_,     2.5f);
+    nh_.param("gain_min_scale",         gain_min_scale_,         0.15f);
 
     // Touchdown parameters
     nh_.param("descent_error_threshold", descent_error_threshold_, 0.50f);
@@ -554,6 +558,32 @@ public:
 
     ROS_INFO("{PlatformIBVS}: depth=%.4f (marker=%d)", depth, active_marker_id);
 
+    // ── During descent, continuously update desired features to current depth ─
+    // The area-coupled error uses desired_area_ to compute Z*. If desired_area_
+    // freezes at the reinit altitude, the area error (Z* - depth) grows as the
+    // drone descends, inflating error_norm even when perfectly centered.
+    // Fix: keep desired_area_ matched to the current depth so only centroid
+    // offset drives lateral corrections. Descent rate is handled separately.
+    if (descent_active_) {
+      float fx = marker_detector_->getCameraFx();
+      float fy = marker_detector_->getCameraFy();
+      float u0 = marker_detector_->getCameraU0();
+      float v0 = marker_detector_->getCameraV0();
+      float safe_depth = std::max(depth, 0.5f);
+      float half_x = (central_marker_size_ / 2.0f) / safe_depth * fx;
+      float half_y = (central_marker_size_ / 2.0f) / safe_depth * fy;
+
+      IBVSController::VisualFeatures desired;
+      desired.x = {u0 - half_x, u0 + half_x, u0 + half_x, u0 - half_x};
+      desired.y = {v0 - half_y, v0 - half_y, v0 + half_y, v0 + half_y};
+      ibvs_controller_->setDesiredFeatures(desired, safe_depth);
+    }
+
+    // ── Altitude-based gain scheduling ──────────────────────────────────
+    float gain_scale = std::max(gain_min_scale_,
+                       std::min(1.0f, depth / gain_full_altitude_));
+    ibvs_controller_->setGainScale(gain_scale);
+
     auto ctrl = ibvs_controller_->computeControlLaw(features, depth);
 
     // ROS_INFO_THROTTLE(1.0, "PlatformIBVS: err=%.4f  vx=%.3f vy=%.3f vz=%.3f
@@ -597,6 +627,9 @@ public:
             1.0, "TOUCHDOWN: Descent paused — err %.4f > %.4f. Re-centering.",
             ctrl.error_norm, descent_error_threshold_);
       }
+
+      // Never command upward movement during descent
+      cmd_vz = std::max(0.0f, cmd_vz);
     }
 
     // Compute final velocity commands
@@ -834,7 +867,10 @@ private:
    * @brief Re-initialize desired features for the central descent marker.
    *
    * Computes a desired feature window sized to the central marker's physical
-   * dimensions projected at desired_depth_, using actual camera intrinsics.
+   * dimensions projected at the CURRENT altitude, using actual camera intrinsics.
+   * Using current altitude (not desired_depth_) ensures that at the moment of
+   * switch, desired_area ≈ current_area, so Z* ≈ depth and the area error
+   * starts near zero. Only centroid offset drives initial corrections.
    * Then resets PID state (integral, derivative, error_norm_max) so the
    * approach-phase history doesn't contaminate the landing phase.
    */
@@ -844,15 +880,20 @@ private:
     float u0 = marker_detector_->getCameraU0();
     float v0 = marker_detector_->getCameraV0();
 
-    // Half the marker's physical extent projected at desired_depth_
-    float half_x = (central_marker_size_ / 2.0f) / desired_depth_ * fx;
-    float half_y = (central_marker_size_ / 2.0f) / desired_depth_ * fy;
+    // Use CURRENT altitude, not desired_depth_.
+    // This makes desired_area match what marker 0 actually looks like right now,
+    // so Z* ≈ depth at transition → no area error spike.
+    float reinit_depth = std::max(current_altitude_, 0.5f);
+
+    // Half the marker's physical extent projected at current altitude
+    float half_x = (central_marker_size_ / 2.0f) / reinit_depth * fx;
+    float half_y = (central_marker_size_ / 2.0f) / reinit_depth * fy;
 
     IBVSController::VisualFeatures desired;
     desired.x = {u0 - half_x, u0 + half_x, u0 + half_x, u0 - half_x};
     desired.y = {v0 - half_y, v0 - half_y, v0 + half_y, v0 + half_y};
 
-    ibvs_controller_->setDesiredFeatures(desired, desired_depth_);
+    ibvs_controller_->setDesiredFeatures(desired, reinit_depth);
 
     // Reset clears: integral wind-up, derivative filter, error_norm_max.
     ibvs_controller_->reset();

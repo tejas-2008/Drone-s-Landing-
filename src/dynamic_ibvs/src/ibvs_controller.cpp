@@ -17,7 +17,7 @@ IBVSController::IBVSController()
       desired_centroid_y_(0), current_centroid_x_(0), current_centroid_y_(0),
       current_normalized_area_(0), error_norm_max_(1.0f),
       first_computation_(false), kd_gain_(0.0f), has_prev_error_(false),
-      ki_gain_(0.0f), integral_windup_limit_(0.5f) {
+      ki_gain_(0.0f), integral_windup_limit_(0.5f), gain_scale_(1.0f) {
   // Initialize matrices
   jacobian_ = -1.0 * arma::diagmat(arma::ones<arma::vec>(4));
   desired_features_image_ = arma::zeros<arma::mat>(4, 2);
@@ -40,7 +40,12 @@ void IBVSController::setGainLimits(float lambda_min, float lambda_max,
   ki_gain_ = ki_gain;
   integral_windup_limit_ = integral_windup_limit;
   ROS_INFO("IBVS: Gains set - lambda:[%.2f,%.2f] kd:%.3f ki:%.3f windup:%.2f",
-           lambda_min_, lambda_max_, kd_gain_, ki_gain_, integral_windup_limit_);
+           lambda_min_, lambda_max_, kd_gain_, ki_gain_,
+           integral_windup_limit_);
+}
+
+void IBVSController::setGainScale(float scale) {
+  gain_scale_ = std::max(0.0f, std::min(1.0f, scale));
 }
 
 void IBVSController::setActiveCamera(const CameraIntrinsics &intrinsics) {
@@ -144,12 +149,19 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
   // Compute error norm
   output.error_norm = arma::norm(error_, 2);
 
-  // Compute adaptive gain
+  // Compute adaptive gain — error_norm_max_ is a dynamic high-watermark
   if (!first_computation_) {
     error_norm_max_ = output.error_norm;
     first_computation_ = true;
+  } else if (output.error_norm > error_norm_max_) {
+    error_norm_max_ = output.error_norm;
   }
   float lambda = computeAdaptiveGain(output.error_norm);
+
+  // Apply altitude-based gain scheduling: gain_scale_ ∈ [0,1]
+  float eff_lambda = lambda;
+  float eff_kd = kd_gain_ * gain_scale_;
+  float eff_ki = ki_gain_ * gain_scale_;
 
   // Compute pseudo-inverse of Jacobian
   jacobian_pinv_ = arma::pinv(jacobian_);
@@ -160,7 +172,7 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
   ros::Time now = ros::Time::now();
   float dt = 0.0f;
 
-  if (kd_gain_ > EPSILON && has_prev_error_) {
+  if (eff_kd > EPSILON && has_prev_error_) {
     dt = (now - prev_error_stamp_).toSec();
     if (dt > 1e-4f && dt < 1.0f) {
       arma::vec raw_derivative = (error_ - prev_error_) / dt;
@@ -169,7 +181,7 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
       error_derivative_ = DERIV_FILTER_ALPHA * raw_derivative +
                           (1.0f - DERIV_FILTER_ALPHA) * error_derivative_;
 
-      derivative_contribution = -kd_gain_ * jacobian_pinv_ * error_derivative_;
+      derivative_contribution = -eff_kd * jacobian_pinv_ * error_derivative_;
     }
   }
 
@@ -178,7 +190,7 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
   // offsets to zero (e.g., constant-velocity platform lag).
   arma::vec integral_contribution = arma::zeros<arma::vec>(4);
 
-  if (ki_gain_ > EPSILON && has_prev_error_) {
+  if (eff_ki > EPSILON && has_prev_error_) {
     if (dt < EPSILON) {
       dt = (now - prev_error_stamp_).toSec();
     }
@@ -192,7 +204,7 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
         error_integral_ *= (integral_windup_limit_ / integral_norm);
       }
 
-      integral_contribution = -ki_gain_ * jacobian_pinv_ * error_integral_;
+      integral_contribution = -eff_ki * jacobian_pinv_ * error_integral_;
     }
   }
 
@@ -201,9 +213,10 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
   prev_error_stamp_ = now;
   has_prev_error_ = true;
 
-  // Compute control velocity: v = -λ·J⁺·e  -  kd·J⁺·ė  -  ki·J⁺·∫e
-  control_velocity_ =
-      -lambda * jacobian_pinv_ * error_ + derivative_contribution + integral_contribution;
+  // Compute control velocity: v = -λ·J⁺·e  -  kd·J⁺·ė  -  ki·J⁺·∫e  (scaled by
+  // gain_scale_)
+  control_velocity_ = -eff_lambda * jacobian_pinv_ * error_ +
+                      derivative_contribution + integral_contribution;
 
   // Extract control outputs
   output.v_x = control_velocity_(0);
@@ -211,13 +224,13 @@ IBVSController::computeControlLaw(const VisualFeatures &current_features,
   output.v_z = control_velocity_(2);
   output.omega_yaw = control_velocity_(3);
 
-  ROS_INFO_THROTTLE(
-      1.0,
-      COLOR_YELLOW "IBVS: err=%.4f λ=%.3f kd=%.3f ki=%.3f ∫norm=%.3f vel=[%.3f, %.3f, "
-                   "%.3f, %.3f]" COLOR_RESET,
-      output.error_norm, lambda, kd_gain_, ki_gain_,
-      arma::norm(error_integral_, 2),
-      output.v_x, output.v_y, output.v_z, output.omega_yaw);
+  ROS_INFO_THROTTLE(1.0,
+                    COLOR_YELLOW
+                    "IBVS: err=%.4f λ=%.3f(×%.2f) kd=%.3f ki=%.3f ∫norm=%.3f "
+                    "vel=[%.3f, %.3f, %.3f, %.3f]" COLOR_RESET,
+                    output.error_norm, lambda, gain_scale_, eff_kd, eff_ki,
+                    arma::norm(error_integral_, 2), output.v_x, output.v_y,
+                    output.v_z, output.omega_yaw);
 
   return output;
 }

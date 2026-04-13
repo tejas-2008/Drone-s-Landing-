@@ -5,27 +5,32 @@ marker_size: 1.7        # Physical side length of the marker [m]
 # ── IBVS control law ──────────────────────────────────────────────────────────
 control_frequency: 50.0   # Main control loop rate [Hz]
 error_threshold: 0.1     # Feature error norm to declare "acquired"
-max_linear_velocity: 0.3  # Velocity saturation limit per axis [m/s]
+max_linear_velocity: 0.3  # Velocity saturation limit per axis [m/s]              0.3 @v 0 to 0.1
 max_angular_velocity: 0.3 # Yaw rate saturation limit [rad/s]
-desired_depth: 2.5        # Desired camera-to-marker distance [m]
+desired_depth: 1.0        # Desired camera-to-marker distance [m]
 
 # ── Flight setup ──────────────────────────────────────────────────────────────
 auto_switch_to_offboard: true  # Request OFFBOARD mode automatically
-takeoff_altitude: 3.5          # Target altitude before IBVS starts [m AGL]
+takeoff_altitude: 2.5          # Target altitude before IBVS starts [m AGL]
 takeoff_climb_velocity: 0.5    # Climb rate during takeoff phase [m/s]
 
 # ── Adaptive gain (read by IBVSController if supported) ───────────────────────
 lambda_min: 0.25   # Gain when far (conservative — avoids overshoot on approach)
-lambda_max: 0.75    # Gain when close (moderate — prevents oscillation at convergence)
-kd_gain: 0.12       # Derivative gain (reduced to avoid amplifying detection noise)
-ki_gain: 0.05      # Integral gain (drives steady-state offset to zero)
+lambda_max: 0.9    # Gain when close (halved from 1.0 — prevents oscillation)
+kd_gain: 0.07 #0.175       # Derivative gain (lowered — was amplifying oscillation's own ė)      0.007 @v 0 to 0.1
+ki_gain: 0.08      # Integral gain (slightly up to close steady-state gap with softer P)  0.007 @v0 to 0.1
 integral_windup_limit: 0.5  # L2 norm cap on integral accumulator
 
+# ── Altitude-based gain scheduling ────────────────────────────────────────────
+# All PID gains are multiplied by: clamp(depth / gain_full_altitude, gain_min_scale, 1.0)
+gain_full_altitude: 1.5    # depth above which gains are 100% [m]
+gain_min_scale: 1.0        # minimum gain multiplier (at ground level)
+
 # ── Touchdown / landing ──────────────────────────────────────────────────
-descent_error_threshold: 0.10   # Feature error norm must stay below this to allow descent
-descent_velocity: 0.1           # Constant descent rate during landing [m/s]
-landing_altitude: 0.5           # Altitude at which to disarm [m AGL]
-descent_stabilization_time: 5.0 # Seconds error must stay stable before descent begins
+descent_error_threshold: 0.15  # Feature error norm must stay below this to allow descent
+descent_velocity: 0.08           # Constant descent rate during landing [m/s]
+landing_altitude: 1.5           # Altitude at which to disarm [m AGL]
+descent_stabilization_time: 2.0 # Seconds error must stay stable before descent begins
 central_marker_id: 0            # ArUco marker ID on the central part of the platform
 central_marker_size: 0.25         # Physical size of the central marker [m] (for depth estimation)
-descent_lateral_scale: 0.3       # Scale factor for lateral/yaw corrections during descent (1.0=full, 0.3=gentle)
+descent_lateral_scale: 1.0       # Scale factor for lateral/yaw corrections during descent (was 0.3 — too slow to track moving platform)

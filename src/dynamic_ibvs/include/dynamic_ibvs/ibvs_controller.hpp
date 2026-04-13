@@ -63,6 +63,9 @@ public:
   void setGainLimits(float lambda_min, float lambda_max, float kd_gain = 0.0f,
                      float ki_gain = 0.0f, float integral_windup_limit = 0.5f);
 
+  /** @brief Set altitude-dependent gain scale factor [0,1]. */
+  void setGainScale(float scale);
+
   /**
    * @brief Set desired visual feature positions
    * @param desired_features Desired feature point coordinates
@@ -148,6 +151,9 @@ private:
   float ki_gain_;                    ///< Integral gain (0 = no integral action)
   float integral_windup_limit_;      ///< L2 norm cap on integral accumulator
   arma::vec error_integral_;         ///< Accumulated error integral
+
+  // Altitude-based gain scheduling
+  float gain_scale_;                 ///< [0,1] multiplier on all PID gains
 
   /**
    * @brief Compute centered moments for given feature points
