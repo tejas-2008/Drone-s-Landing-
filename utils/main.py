@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-ROSBAG Time Series Plotter - Command-line utility for plotting topics from ROSBAG files.
 
-Usage:
-    python3 main.py <bagfile> <topic1> [topic2] [topic3] ...
-    python3 main.py --list <bagfile>  # List all available topics
-    python3 main.py --help             # Show this help message
-"""
 
 import sys
 import os
@@ -41,15 +34,30 @@ def list_topics(bagfile_path):
         return []
 
 
-def plot_topics(bagfile_path, topics_to_plot, fields_to_plot=None, save_path=None, sample_rate=None):
+def plot_topics(bagfile_path, topics_to_plot, fields_to_plot=None, save_path=None, sample_rate=None, title=None):
     """Plot one or more topics from a ROSBAG file."""
     if not topics_to_plot:
         print("Error: No topics specified for plotting")
         return
     
     try:
-        plotter = ROSBagPlotter(bagfile_path, figsize=(14, 7), sample_rate=sample_rate)
-        
+        y_label = ""
+        title = title if title is not None else ""
+        for topic in topics_to_plot:
+            if not title:
+                title = ROSBagPlotter.derive_title(topics_to_plot)
+            if "physical" in topic:
+                y_label = "Value (m)"
+                break
+            elif "pixel" in topic or "error_norms" in topic:
+                y_label = "Value (px)"
+                break
+            elif "feature" in topic:
+                title = "Norm of Error"
+                y_label = "Value (m)"
+                break
+        plotter = ROSBagPlotter(bagfile_path, figsize=(16, 8), sample_rate=sample_rate, legend_fontsize=42, label_fontsize=42)
+
         if len(topics_to_plot) == 1:
             # Plot single topic
             topic = topics_to_plot[0]
@@ -59,8 +67,10 @@ def plot_topics(bagfile_path, topics_to_plot, fields_to_plot=None, save_path=Non
             plotter.plot_topic(
                 topic,
                 field=field,
-                title=f"Feature Error ",
-                y_label="Value (m)", xticks= 20, yticks=40, grid_linewidth=1.0
+                title=title,
+                y_label=y_label,
+                xticks=10, yticks=10,
+                grid_linewidth=1.2,
             )
         else:
             # Plot multiple topics
@@ -69,14 +79,16 @@ def plot_topics(bagfile_path, topics_to_plot, fields_to_plot=None, save_path=Non
                 field = fields_to_plot[idx] if fields_to_plot and idx < len(fields_to_plot) else None
                 field_str = f":{field}" if field else ""
                 print(f"  ✓ {topic}{field_str}")
-            
+
             plotter.plot_multiple_topics(
                 topics_to_plot,
                 fields=fields_to_plot,
-                title=f"Pixel Errors",
-                y_label="Value (px)", xticks= 20, yticks=40, grid_linewidth=0.8
+                title= title, 
+                y_label=y_label,
+                xticks=12, yticks=12,
+                grid_linewidth=1.2,
             )
-        
+
         if save_path:
             plotter.save(save_path, dpi=300)
             print(f"\n✓ Plot saved to: {save_path}")
@@ -94,22 +106,22 @@ def main():
         description="Plot time series data from ROSBAG files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # List all topics and their fields in a bagfile
-  python3 main.py --list output/static_landing_update.bag
-  
-  # Plot a single topic (auto-detect field)
-  python3 main.py output/static_landing_update.bag /drone/pose
-  
-  # Plot a specific field from a topic
-  python3 main.py output/static_landing_update.bag /platform_ibvs/diagnostics/error_norms:x
-  
-  # Plot multiple topics with different fields
-  python3 main.py output/static_landing_update.bag /topic1:x /topic2:y /topic3
-  
-  # Plot multiple topics and save to file
-  python3 main.py output/static_landing_update.bag /topic1:x /topic2:y --save comparison.png
-        """
+        Examples:
+        # List all topics and their fields in a bagfile
+        python3 main.py --list output/static_landing_update.bag
+        
+        # Plot a single topic (auto-detect field)
+        python3 main.py output/static_landing_update.bag /drone/pose
+        
+        # Plot a specific field from a topic
+        python3 main.py output/static_landing_update.bag /platform_ibvs/diagnostics/error_norms:x
+        
+        # Plot multiple topics with different fields
+        python3 main.py output/static_landing_update.bag /topic1:x /topic2:y /topic3
+        
+        # Plot multiple topics and save to file
+        python3 main.py output/static_landing_update.bag /topic1:x /topic2:y --save comparison.png
+                """
     )
     
     parser.add_argument(
@@ -141,6 +153,13 @@ Examples:
         type=float,
         default=None,
         help='Sampling rate in Hz for downsampling (e.g., --sample-rate 10)'
+    )
+
+    parser.add_argument(
+        '--title',
+        type=str,
+        default=None,
+        help='Custom title for the plot (overrides auto-derived title)'
     )
     
     args = parser.parse_args()
@@ -183,7 +202,7 @@ Examples:
     
     # If topics provided, plot them
     if topics_to_plot:
-        plot_topics(args.bagfile, topics_to_plot, fields_to_plot if any(f for f in fields_to_plot) else None, save_path=args.save, sample_rate=args.sample_rate)
+        plot_topics(args.bagfile, topics_to_plot, fields_to_plot if any(f for f in fields_to_plot) else None, save_path=args.save, sample_rate=args.sample_rate, title=args.title)
     else:
         # If no topics specified and not using --list, list topics
         print("No topics specified. Use --list to see available topics.\n")

@@ -1,0 +1,21 @@
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y \
+    python3.11 python3.11-dev python3.11-venv \
+    curl git libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.cargo/bin:/root/.local/bin:${PATH}"
+
+# Install ai_lifecycle core (host-side deps only)
+WORKDIR /workspace
+COPY . /workspace/src/ai-lifecycle/
+RUN uv pip install --system pydantic pyyaml rich questionary click
+
+ENTRYPOINT ["/workspace/src/ai-lifecycle/docker/entrypoint.sh"]

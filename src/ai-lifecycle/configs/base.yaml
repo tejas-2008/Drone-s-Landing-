@@ -1,0 +1,60 @@
+# Base configuration — override in experiment configs
+project: default
+run_name: exp
+
+dependencies:
+  python: "3.11"
+  packages:
+    - "ultralytics>=8.3.0"
+    - "torch>=2.0"
+    - "torchvision"
+    - "matplotlib"
+    - "pandas"
+    - "wandb"
+  extra_index_url: null
+  system_packages:
+    - "libgl1"
+
+model:
+  type: yolov11
+  size: s
+  task: detect
+  weights: null
+  scratch: false
+  loss:
+    box: 7.5
+    cls: 0.5
+    dfl: 1.5
+  optimizer:
+    name: AdamW
+    lr0: 0.001
+    weight_decay: 0.0005
+
+training:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  freeze: null
+  device: "0"
+
+evaluation:
+  split: val
+  conf: 0.001
+  iou: 0.6
+
+inference:
+  source: null
+  conf: 0.25
+  iou: 0.7
+  save: true
+
+logging:
+  level: INFO
+  to_file: true
+  tensorboard: true
+  csv: true
+  wandb: false
+  wandb_project: null
+
+outputs:
+  root: /workspace/outputs

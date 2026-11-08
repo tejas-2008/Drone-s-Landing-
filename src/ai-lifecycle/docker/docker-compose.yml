@@ -1,0 +1,28 @@
+version: "3.9"
+services:
+  runner:
+    build:
+      context: ../../
+      dockerfile: src/ai-lifecycle/docker/Dockerfile.base
+    image: ailc-base:latest
+    container_name: ailc-${AILC_NAME:-default}
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - AILC_CONFIG=${AILC_CONFIG:-/workspace/src/ai-lifecycle/configs/yolov11_detect.yaml}
+    volumes:
+      - ../../:/workspace
+      - ailc-uv-cache:/root/.cache/uv
+      - ailc-envs:/envs
+    working_dir: /workspace
+    command: ["sleep", "infinity"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  ailc-uv-cache:
+  ailc-envs:

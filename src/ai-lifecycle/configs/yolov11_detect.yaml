@@ -1,0 +1,14 @@
+base: configs/base.yaml
+
+project: yolov11_detect
+run_name: exp1
+
+dataset:
+  type: yolo
+  path: /data/my_dataset
+  train: images/train
+  val: images/val
+  test: images/test
+  names:
+    0: class_a
+    1: class_b
